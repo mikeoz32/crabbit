@@ -7,6 +7,43 @@ module Crabbit::Internal::Wire
   record Tune, max_frame_size : UInt32, heartbeat_seconds : UInt32
   record ConsumerUpdate, correlation_id : UInt32, subscription_id : UInt8, active : Bool
 
+  enum PublishPayloadFormat
+    Encoded
+    Data
+  end
+
+  record PublishEntry,
+    publishing_id : UInt64,
+    payload : Bytes,
+    filter : String?,
+    format : PublishPayloadFormat do
+    def self.encoded(publishing_id : UInt64, payload : Bytes, filter : String? = nil) : self
+      new(publishing_id, payload, filter, PublishPayloadFormat::Encoded)
+    end
+
+    def self.data(publishing_id : UInt64, payload : Bytes, filter : String? = nil) : self
+      new(publishing_id, payload, filter, PublishPayloadFormat::Data)
+    end
+
+    def encoded_size : Int64
+      payload.size.to_i64 + (format.data? ? (payload.size <= UInt8::MAX ? 5_i64 : 8_i64) : 0_i64)
+    end
+
+    def wire_size(version : UInt16) : Int64
+      size = 12_i64 + encoded_size
+      size += 2_i64 + (filter.try(&.bytesize) || 0) if version >= 2
+      size
+    end
+
+    def write_payload(writer : Writer) : Nil
+      if format.data?
+        AMQP::Encoder.new(writer.io).write_described_binary(AMQP::SectionDescriptor::Data, payload)
+      else
+        writer.write_raw(payload)
+      end
+    end
+  end
+
   module Commands
     extend self
 
@@ -90,6 +127,61 @@ module Crabbit::Internal::Wire
           w.write_string(filter) if version >= 2
           w.write_bytes(message)
         end
+      end
+    end
+
+    def publish_frame_size(messages : Array(PublishEntry), version : UInt16 = 1_u16) : Int32
+      validate_publish_filters!(messages, version)
+      capacity = 13_i64
+      messages.each do |entry|
+        if entry.encoded_size > Int32::MAX
+          raise ProtocolError.new("publish message exceeds Int32 protocol limit")
+        end
+        if filter = entry.filter
+          if filter.bytesize > Int16::MAX
+            raise ProtocolError.new("string exceeds Int16 protocol limit")
+          end
+        end
+        capacity += entry.wire_size(version)
+      end
+      raise ProtocolError.new("publish frame exceeds Int32 memory limit") if capacity > Int32::MAX
+      capacity.to_i32
+    end
+
+    # Writes a complete publish frame into caller-owned reusable memory.
+    def write_publish(
+      io : IO::Memory,
+      publisher_id : UInt8,
+      messages : Array(PublishEntry),
+      version : UInt16 = 1_u16,
+    ) : Int32
+      frame_size = publish_frame_size(messages, version)
+      write_publish(io, publisher_id, messages, version, frame_size)
+      frame_size
+    end
+
+    def write_publish(
+      io : IO::Memory,
+      publisher_id : UInt8,
+      messages : Array(PublishEntry),
+      version : UInt16,
+      frame_size : Int32,
+    ) : Nil
+      io.clear
+      writer = Writer.new(io)
+      writer.write_u32((frame_size - 4).to_u32)
+        .write_u16(Command::Publish.value)
+        .write_u16(version)
+        .write_u8(publisher_id)
+        .write_i32(messages.size.to_i32)
+      messages.each do |entry|
+        writer.write_u64(entry.publishing_id)
+        writer.write_string(entry.filter) if version >= 2
+        writer.write_i32(entry.encoded_size.to_i32)
+        entry.write_payload(writer)
+      end
+      unless writer.size == frame_size
+        raise ProtocolError.new("publish frame size changed while writing")
       end
     end
 
@@ -329,6 +421,12 @@ module Crabbit::Internal::Wire
         writer.write_u64(offset.value.not_nil!.as(UInt64))
       when .timestamp?
         writer.write_i64(offset.value.not_nil!.as(Int64))
+      end
+    end
+
+    private def validate_publish_filters!(messages : Array(PublishEntry), version : UInt16) : Nil
+      if version == 1 && messages.any? { |entry| !entry.filter.nil? }
+        raise ProtocolError.new("publish filters require publish command version 2")
       end
     end
   end

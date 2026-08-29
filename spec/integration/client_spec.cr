@@ -54,6 +54,35 @@ if ENV["CRABBIT_INTEGRATION"]? == "1"
       end
     end
 
+    it "owns a Bytes payload until its delayed batch is transmitted" do
+      environment = integration_environment
+      stream = unique_stream("owned-bytes")
+      environment.create_stream(stream, Crabbit::StreamOptions.new(initial_cluster_size: 1))
+      producer = environment.producer(
+        stream,
+        Crabbit::ProducerOptions.new(batch_size: 10, batch_delay: 250.milliseconds),
+      )
+      consumer = environment.consumer(
+        stream,
+        Crabbit::ConsumerOptions.new(offset: Crabbit::OffsetSpecification.first),
+      )
+      payload = "owned-by-producer".to_slice.dup
+
+      begin
+        handle = producer.publish(payload)
+        payload.fill(0x78_u8)
+        handle.await(20.seconds).confirmed.should be_true
+        delivery = consumer.receive
+        String.new(delivery.body).should eq "owned-by-producer"
+        delivery.processed!
+      ensure
+        consumer.close
+        producer.close
+        environment.delete_stream(stream)
+        environment.close
+      end
+    end
+
     it "publishes and consumes every built-in sub-entry compression format" do
       environment = integration_environment
       stream = unique_stream("compression")

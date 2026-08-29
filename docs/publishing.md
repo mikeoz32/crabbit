@@ -1,6 +1,6 @@
 # Publishing
 
-`Producer` publishes asynchronously to one stream. Each call reserves backpressure capacity, assigns a publishing ID, queues encoded AMQP bytes, and returns a `PublishHandle`.
+`Producer` publishes asynchronously to one stream. Each call reserves backpressure capacity, assigns a publishing ID, queues an owned payload, and returns a `PublishHandle`.
 
 ## Payload forms
 
@@ -11,9 +11,9 @@ producer.publish(Crabbit::Message.new("complete AMQP message"))
 producer.publish(Crabbit::RawMessage.new(encoded_amqp))
 ```
 
-- `String` and `Bytes` become a complete message with one AMQP Data section.
+- `String` and `Bytes` become a complete message with one AMQP Data section. A `Bytes` payload is copied before `publish` returns, so the caller may safely reuse or mutate its original slice.
 - `Message` encodes all configured AMQP 1.0 sections.
-- `RawMessage` is sent unchanged and must already contain a complete valid AMQP message.
+- `RawMessage` is sent unchanged and must already contain a complete valid AMQP message. Its constructor copies by default; `copy: false` explicitly makes the caller responsible for keeping the bytes alive and immutable until confirmation.
 
 Use `Message#to_amqp(io)` when preparing encoded messages for another destination without an intermediate byte allocation. See [AMQP codec](amqp-codec.md).
 
@@ -71,7 +71,7 @@ options = Crabbit::ProducerOptions.new(
 )
 ```
 
-The batch is sent when `batch_size` is reached or `batch_delay` expires. Crabbit splits a batch at the negotiated frame limit. A single encoded message that cannot fit raises `FrameTooLargeError` through its confirmation.
+The batch is sent when `batch_size` is reached or `batch_delay` expires. Ordinary Publish frames are assembled in a reusable per-connection buffer and written to the socket once. `Bytes` payloads receive their AMQP Data envelope while that frame is assembled, avoiding an intermediate encoded-message allocation. Crabbit splits a batch at the negotiated frame limit. A single encoded message that cannot fit raises `FrameTooLargeError` through its confirmation.
 
 ## Sub-entry batching and compression
 

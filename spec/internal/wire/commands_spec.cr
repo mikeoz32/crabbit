@@ -50,6 +50,46 @@ describe Crabbit::Internal::Wire::Commands do
     reader.finish!
   end
 
+  it "writes encoded and AMQP Data publishes byte-identically into reusable memory" do
+    data_8 = Bytes.new(255, 0x61_u8)
+    data_32 = Bytes.new(256, 0x62_u8)
+    encoded = Crabbit::Message.new("encoded").to_amqp
+    entries = [
+      Wire::PublishEntry.data(41_u64, data_8, "short"),
+      Wire::PublishEntry.data(42_u64, data_32),
+      Wire::PublishEntry.encoded(43_u64, encoded, "raw"),
+    ]
+    expected_entries = [
+      {41_u64, Crabbit::AMQP::MessageCodec.encode_data(data_8), "short"},
+      {42_u64, Crabbit::AMQP::MessageCodec.encode_data(data_32), nil},
+      {43_u64, encoded, "raw"},
+    ]
+    expected = Wire::Commands.publish(7_u8, expected_entries, version: 2_u16)
+    io = IO::Memory.new(1)
+
+    Wire::Commands.write_publish(io, 7_u8, entries, version: 2_u16).should eq expected.size
+    io.to_slice.should eq expected
+
+    replacement = [Wire::PublishEntry.data(99_u64, Bytes[1, 2, 3])]
+    replacement_expected = Wire::Commands.publish(
+      3_u8,
+      [{99_u64, Crabbit::AMQP::MessageCodec.encode_data(Bytes[1, 2, 3]), nil}],
+    )
+    Wire::Commands.write_publish(io, 3_u8, replacement).should eq replacement_expected.size
+    io.to_slice.should eq replacement_expected
+  end
+
+  it "applies publish validation before writing reusable memory" do
+    io = IO::Memory.new
+    io << "unchanged"
+    entries = [Wire::PublishEntry.data(1_u64, Bytes[1], "filter")]
+
+    expect_raises(Crabbit::ProtocolError, "publish filters require publish command version 2") do
+      Wire::Commands.write_publish(io, 1_u8, entries)
+    end
+    String.new(io.to_slice).should eq "unchanged"
+  end
+
   it "encodes every offset specification" do
     {
       Crabbit::OffsetSpecification.first          => {Crabbit::OffsetType::First, nil},

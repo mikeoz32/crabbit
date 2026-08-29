@@ -76,7 +76,7 @@ consumer.close
 environment.close
 ```
 
-`publish` accepts `Message`, `RawMessage`, `Bytes`, or `String`. `Bytes` and `String` are wrapped in an AMQP 1.0 Data section. `RawMessage` sends already encoded AMQP bytes unchanged.
+`publish` accepts `Message`, `RawMessage`, `Bytes`, or `String`. `Bytes` and `String` are wrapped in an AMQP 1.0 Data section; mutable `Bytes` are copied before `publish` returns. `RawMessage` sends already encoded AMQP bytes unchanged and copies them by default.
 
 The returned `PublishHandle` supports both `await` and `on_confirm`. `max_unconfirmed` is a hard backpressure limit: by default the publishing fiber waits for capacity; set `enqueue_timeout` to fail with `TimeoutError` instead. Broker confirms, broker errors, and confirmation timeouts resolve each handle exactly once.
 

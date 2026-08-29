@@ -94,6 +94,7 @@ module Crabbit
     getter publishing_id : UInt64
     getter bytes : Bytes
     getter filter : String?
+    getter payload_format : Internal::Wire::PublishPayloadFormat
     getter created_at : Time::Instant
 
     @mutex = Mutex.new
@@ -107,9 +108,21 @@ module Crabbit
       @publishing_id : UInt64,
       @bytes : Bytes,
       @filter : String?,
+      @payload_format : Internal::Wire::PublishPayloadFormat,
       @callback_dispatcher : ConfirmationCallbackDispatcher,
     )
       @created_at = Time.instant
+    end
+
+    def wire_entry : Internal::Wire::PublishEntry
+      Internal::Wire::PublishEntry.new(publishing_id, bytes, filter, payload_format)
+    end
+
+    def encoded_bytes : Bytes
+      if payload_format.data?
+        raise ProtocolError.new("AMQP Data payload reached the sub-entry encoder")
+      end
+      bytes
     end
 
     def completed? : Bool
@@ -338,14 +351,24 @@ module Crabbit
       end
     end
 
-    # Wraps *bytes* in one AMQP Data section and publishes the message.
+    # Copies *bytes*, wraps them in one AMQP Data section, and publishes the message.
+    # The caller may mutate the original slice after this method returns.
     def publish(
       bytes : Bytes,
       filter : String? = nil,
       *,
       publishing_id : UInt64? = nil,
     ) : PublishHandle
-      enqueue(AMQP::MessageCodec.encode_data(bytes), filter, publishing_id)
+      if options.sub_entry_size > 1
+        enqueue(AMQP::MessageCodec.encode_data(bytes), filter, publishing_id)
+      else
+        enqueue(
+          bytes.dup,
+          filter,
+          publishing_id,
+          Internal::Wire::PublishPayloadFormat::Data,
+        )
+      end
     end
 
     # Wraps *bytes* in one AMQP Data section, publishes it, and invokes the
@@ -435,6 +458,7 @@ module Crabbit
       bytes : Bytes,
       filter : String?,
       publishing_id : UInt64? = nil,
+      payload_format : Internal::Wire::PublishPayloadFormat = Internal::Wire::PublishPayloadFormat::Encoded,
     ) : PublishHandle
       raise ResourceClosedError.new("producer is closed") if closed?
       if filter && options.sub_entry_size > 1
@@ -442,7 +466,7 @@ module Crabbit
       end
       acquire_permit!
       id = reserve_publishing_id(publishing_id)
-      pending = PendingPublish.new(id, bytes, filter, @callback_dispatcher)
+      pending = PendingPublish.new(id, bytes, filter, payload_format, @callback_dispatcher)
       unless @confirmations.add(id, pending)
         @permits.send(nil)
         raise ArgumentError.new("publishing ID #{id} is already awaiting confirmation")
@@ -614,16 +638,16 @@ module Crabbit
       publisher_id : UInt8,
       messages : Array(PendingPublish),
     ) : Nil
-      entries = messages.map { |message| {message.publishing_id, message.bytes, message.filter} }
+      entries = messages.map(&.wire_entry)
       send_partitioned(entries, client.connection.negotiated_max_frame_size) do |slice|
-        @confirmations.with_pending_singles(slice.each.map(&.[0])) do |pending_messages|
+        @confirmations.with_pending_singles(slice.each.map(&.publishing_id)) do |pending_messages|
           active = pending_messages.map do |pending|
             pending.mark_sent
-            {pending.publishing_id, pending.bytes, pending.filter}
+            pending.wire_entry
           end
 
-          version = active.any?(&.[2]) ? client.connection.version(Internal::Wire::Command::Publish, 2_u16) : 1_u16
-          client.connection.send(Internal::Wire::Commands.publish(publisher_id, active, version))
+          version = active.any?(&.filter) ? client.connection.version(Internal::Wire::Command::Publish, 2_u16) : 1_u16
+          client.connection.send_publish(publisher_id, active, version)
         end
       end
     end
@@ -640,7 +664,7 @@ module Crabbit
       @confirmations.with_pending_groups(groups) do |prepared|
         entries = prepared.map do |root_id, pending_messages|
           pending_messages.each(&.mark_sent)
-          encoded = codec.encode(pending_messages.map(&.bytes), options.compression)
+          encoded = codec.encode(pending_messages.map(&.encoded_bytes), options.compression)
           {root_id, encoded, pending_messages.map(&.publishing_id)}
         end
         send_partitioned(entries, client.connection.negotiated_max_frame_size) do |slice|
@@ -681,8 +705,8 @@ module Crabbit
     # conservative estimate includes all simple and sub-entry fields.
     private def yield_entry_size(entry : T) : UInt64 forall T
       case entry
-      when Tuple(UInt64, Bytes, String?)
-        14_u64 + entry[1].size + (entry[2]?.try(&.bytesize) || 0)
+      when Internal::Wire::PublishEntry
+        entry.wire_size(2_u16).to_u64
       when Tuple(UInt64, Internal::EncodedSubEntry, Array(UInt64))
         19_u64 + entry[1].data.size
       else

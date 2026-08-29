@@ -1,6 +1,8 @@
 # :nodoc:
 module Crabbit::Internal
   class Connection
+    PUBLISH_BUFFER_RETAIN_LIMIT = 1_048_576
+
     enum State
       New
       Connecting
@@ -37,6 +39,7 @@ module Crabbit::Internal
     @closed_channel = Channel(Nil).new
     @disconnect_notified = false
     @oauth2_registration : OAuth2SaslAuthenticator::Registration?
+    @publish_buffer : IO::Memory?
 
     def initialize(@configuration : Configuration, @endpoint : Endpoint)
       @state = State::New
@@ -111,6 +114,38 @@ module Crabbit::Internal
     def send(bytes : Bytes) : Nil
       raise ConnectionClosedError.new("connection is not open") unless open?
       write(bytes)
+    end
+
+    def send_publish(
+      publisher_id : UInt8,
+      messages : Array(Wire::PublishEntry),
+      version : UInt16 = 1_u16,
+    ) : Nil
+      raise ConnectionClosedError.new("connection is not open") unless open?
+      frame_size = Wire::Commands.publish_frame_size(messages, version)
+      if negotiated_max_frame_size > 0 && frame_size.to_u64 > negotiated_max_frame_size
+        raise FrameTooLargeError.new(frame_size.to_u32, negotiated_max_frame_size)
+      end
+
+      @write_mutex.synchronize do
+        buffer = @publish_buffer
+        unless buffer
+          buffer = IO::Memory.new(Math.min(frame_size, PUBLISH_BUFFER_RETAIN_LIMIT))
+          @publish_buffer = buffer
+        end
+        begin
+          Wire::Commands.write_publish(buffer, publisher_id, messages, version, frame_size)
+          socket.write(buffer.to_slice)
+          socket.flush
+          touch_write
+        ensure
+          @publish_buffer = nil if frame_size > PUBLISH_BUFFER_RETAIN_LIMIT
+        end
+      end
+    rescue ex : IO::Error
+      error = ConnectionClosedError.new("connection write failed: #{ex.message}")
+      shutdown(error, notify: true)
+      raise error
     end
 
     def version(command : Wire::Command, preferred : UInt16 = Wire::SUPPORTED_VERSIONS[command].end) : UInt16
