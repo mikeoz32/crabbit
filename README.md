@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/mikeoz32/crabbit/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeoz32/crabbit/actions/workflows/ci.yml)
 [![GitHub release](https://img.shields.io/github/v/release/mikeoz32/crabbit)](https://github.com/mikeoz32/crabbit/releases)
+[![API documentation](https://img.shields.io/badge/docs-API%20reference-blue)](https://mikeoz32.github.io/crabbit/)
 
 `crabbit` is a native, asynchronous RabbitMQ Streams client for Crystal. It implements the Stream binary protocol directly, including AMQP 1.0 message encoding, publisher confirms, consumer credit, recovery, filtering, compression, offset tracking, and super streams.
 
@@ -15,9 +16,25 @@ Add the shard:
 dependencies:
   crabbit:
     github: mikeoz32/crabbit
+    version: ~> 0.1.0
 ```
 
 Then run `shards install`. Linux builds need the LZ4 runtime/development library available to the linker (`liblz4-dev` on Debian/Ubuntu). Gzip, Snappy, LZ4, and Zstandard codecs are registered by default; codecs can be replaced through `CompressionCodecs`.
+
+## Documentation
+
+- [Generated Crystal API reference](https://mikeoz32.github.io/crabbit/)
+- [Guide index](https://github.com/mikeoz32/crabbit/blob/main/docs/README.md)
+- [Getting started](https://github.com/mikeoz32/crabbit/blob/main/docs/getting-started.md)
+- [Publishing](https://github.com/mikeoz32/crabbit/blob/main/docs/publishing.md) and [consuming](https://github.com/mikeoz32/crabbit/blob/main/docs/consuming.md)
+- [Configuration and TLS](https://github.com/mikeoz32/crabbit/blob/main/docs/configuration.md)
+- [Super streams](https://github.com/mikeoz32/crabbit/blob/main/docs/super-streams.md)
+- [OAuth 2](https://github.com/mikeoz32/crabbit/blob/main/docs/oauth2.md)
+- [AMQP 1.0 messages and codec](https://github.com/mikeoz32/crabbit/blob/main/docs/amqp-codec.md)
+- [Operations, recovery, and errors](https://github.com/mikeoz32/crabbit/blob/main/docs/operations.md)
+- [Protocol support matrix](https://github.com/mikeoz32/crabbit/blob/main/docs/protocol-support.md)
+
+The API site is generated directly from Crystal doc comments with `crystal docs` on every push to `main`.
 
 ## Publish and consume
 

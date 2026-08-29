@@ -1,3 +1,4 @@
+# :nodoc:
 module Crabbit::Internal::Wire
   RESPONSE_MASK = 0x8000_u16
   KEY_MASK      = 0x7fff_u16

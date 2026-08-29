@@ -1,3 +1,4 @@
+# :nodoc:
 module Crabbit::Internal::Wire
   record Response, correlation_id : UInt32, code : ResponseCode, reader : Reader
   record PublishConfirmation, publisher_id : UInt8, publishing_ids : Array(UInt64)

@@ -1,3 +1,4 @@
+# :nodoc:
 module Crabbit::Internal::Wire
   record Frame, key : UInt16, version : UInt16, body : Bytes do
     def response? : Bool

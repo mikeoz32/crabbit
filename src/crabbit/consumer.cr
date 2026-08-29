@@ -1,9 +1,18 @@
 module Crabbit
+  # Context passed to the context-aware Single Active Consumer update callback.
+  #
+  # The callback returns the `OffsetSpecification` to use for the new active or
+  # inactive state. `#consumer` can query a stored offset when making that
+  # decision.
   class ConsumerUpdateContext
+    # Returns whether this subscription is becoming active.
     getter active : Bool
+    # Returns the partition stream receiving the update.
     getter stream : String
+    # Returns the affected consumer.
     getter consumer : Consumer
 
+    # :nodoc:
     def initialize(@active : Bool, @stream : String, @consumer : Consumer)
     end
   end
@@ -38,11 +47,24 @@ module Crabbit
     end
   end
 
+  # One logical message delivered from a RabbitMQ stream.
+  #
+  # The raw AMQP payload is available immediately. `#message` decodes it lazily
+  # and caches the result. Pull consumers must call `#processed!` after
+  # successful processing so Crabbit can replenish chunk credit and advance the
+  # recovery offset.
   class Delivery
+    # Returns the source stream name.
     getter stream : String
+    # Returns the absolute stream offset.
     getter offset : UInt64
+    # Returns the broker chunk timestamp.
     getter timestamp : Time
+    # Returns the committed chunk ID reported by RabbitMQ.
     getter committed_chunk_id : UInt64
+    # Returns the complete encoded AMQP message bytes.
+    #
+    # This buffer owns the storage referenced by zero-copy `#message` values.
     getter raw : Bytes
 
     @processed_mutex = Mutex.new
@@ -61,20 +83,27 @@ module Crabbit
       @raw = raw_delivery.bytes
     end
 
+    # Lazily decodes and returns the complete AMQP message.
     def message : Message
       @message_mutex.synchronize do
         @decoded_message ||= Message.from_amqp(raw, zero_copy: true)
       end
     end
 
+    # Returns the logical Data body from `#message`.
     def body : Bytes
       message.body
     end
 
+    # Returns whether processing was acknowledged locally.
     def processed? : Bool
       @processed_mutex.synchronize { @processed }
     end
 
+    # Idempotently marks this delivery as processed.
+    #
+    # Credit is replenished only after every logical delivery in the same broker
+    # chunk is processed.
     def processed! : Nil
       first = @processed_mutex.synchronize do
         unless @processed
@@ -88,10 +117,18 @@ module Crabbit
     end
   end
 
+  # Recovering pull or callback consumer for one RabbitMQ stream.
+  #
+  # Pull mode uses `#receive`, `#receive?`, or `#each`. Callback mode is created
+  # by `Environment#consumer(stream, options) { |delivery| ... }` and marks each
+  # delivery processed after the handler returns. A consumer reconnects and
+  # resumes from the latest contiguous broker-delivery prefix until closed.
   class Consumer
     include Enumerable(Delivery)
 
+    # Returns the subscribed stream name.
     getter stream : String
+    # Returns the immutable consumer options.
     getter options : ConsumerOptions
 
     @state_mutex = Mutex.new
@@ -112,6 +149,10 @@ module Crabbit
     @minimum_delivery_offset : UInt64? = nil
     @entity_id = 0_u64
 
+    # Creates and subscribes a consumer.
+    #
+    # Applications normally use the `Environment#consumer` overload matching
+    # pull or callback mode.
     def initialize(
       @environment : Environment,
       @stream : String,
@@ -130,32 +171,43 @@ module Crabbit
       transition(ResourceState::Open)
     end
 
+    # Returns the current lifecycle state.
     def state : ResourceState
       @state_mutex.synchronize { @state }
     end
 
+    # Returns whether the consumer currently has an active subscription.
     def open? : Bool
       state.open?
     end
 
+    # Returns whether the consumer was permanently closed.
     def closed? : Bool
       state.closed?
     end
 
-    # Receive one delivery. The caller owns acknowledgement and must invoke
-    # `processed!` when processing is complete.
+    # Receives one delivery, waiting while the queue is empty.
+    #
+    # The caller owns acknowledgement and must invoke `Delivery#processed!`
+    # when processing is complete. Raises `ResourceClosedError` after close.
     def receive : Delivery
       @deliveries.receive
     rescue Channel::ClosedError
       raise ResourceClosedError.new("consumer is closed")
     end
 
+    # Receives one delivery, waiting while the queue is empty, or returns `nil`
+    # after the consumer closes and the queue drains.
+    #
+    # The caller must invoke `Delivery#processed!` for every returned delivery.
     def receive? : Delivery?
       @deliveries.receive?
     end
 
+    # Yields deliveries until the consumer closes.
+    #
     # Enumerable consumption acknowledges after the block returns, including
-    # when it raises. Use `receive` for explicit acknowledgement control.
+    # when it raises. Use `#receive` for explicit acknowledgement control.
     def each(&block : Delivery ->) : Nil
       while delivery = @deliveries.receive?
         begin
@@ -166,6 +218,9 @@ module Crabbit
       end
     end
 
+    # Stores an absolute *offset* for this named consumer.
+    #
+    # Raises `ConfigurationError` when `ConsumerOptions#name` is absent.
     def store_offset(offset : UInt64) : Nil
       name = options.name || raise ConfigurationError.new("storing offsets requires a named consumer")
       client = @state_mutex.synchronize { @client }
@@ -174,6 +229,9 @@ module Crabbit
       @offset_mutex.synchronize { @last_stored_offset = offset }
     end
 
+    # Stores the offset of *delivery* for this named consumer.
+    #
+    # Raises `ArgumentError` when the delivery belongs to another stream.
     def store_offset(delivery : Delivery) : Nil
       unless delivery.stream == stream
         raise ArgumentError.new("delivery belongs to #{delivery.stream}, not #{stream}")
@@ -181,6 +239,7 @@ module Crabbit
       store_offset(delivery.offset)
     end
 
+    # Returns this named consumer's stored offset, or `nil` when absent.
     def stored_offset : UInt64?
       name = options.name || raise ConfigurationError.new("querying offsets requires a named consumer")
       client = @state_mutex.synchronize { @client }
@@ -188,6 +247,8 @@ module Crabbit
       @environment.query_offset(name, stream)
     end
 
+    # Idempotently unsubscribes, stores any pending automatic offset, and closes
+    # the delivery queue.
     def close : Nil
       return unless mark_closed
       begin
@@ -209,8 +270,7 @@ module Crabbit
       end
     end
 
-    # Called by Delivery/ChunkAcknowledgement. Public only because helper
-    # objects cannot access private methods in Crystal.
+    # :nodoc:
     def record_processed_offset(offset : UInt64) : Nil
       value_to_store : UInt64? = nil
       @offset_mutex.synchronize do
@@ -225,6 +285,7 @@ module Crabbit
       safely_store(value_to_store) if value_to_store
     end
 
+    # :nodoc:
     def chunk_processed(
       generation : UInt64,
       client : Internal::Client,

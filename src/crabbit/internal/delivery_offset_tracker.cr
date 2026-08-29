@@ -1,3 +1,4 @@
+# :nodoc:
 module Crabbit::Internal
   # Tracks acknowledgements in broker delivery order. Stream offsets are not
   # necessarily adjacent when server-side filtering skips chunks.

@@ -1,0 +1,67 @@
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Crystal API docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+      - run: sudo apt-get update && sudo apt-get install --yes liblz4-dev
+      - run: shards install
+      - name: Generate API documentation
+        run: >-
+          crystal docs src/crabbit.cr
+          --output=site
+          --project-name=Crabbit
+          --source-refname=${GITHUB_SHA}
+          --source-url-pattern=https://github.com/mikeoz32/crabbit/blob/%{refname}/%{path}#L%{line}
+          --canonical-base-url=https://mikeoz32.github.io/crabbit/
+          --base-path=/crabbit
+          --sitemap-base-url=https://mikeoz32.github.io/crabbit/
+          --warnings=all
+          --error-on-warnings
+          --no-color
+      - name: Check public API documentation coverage
+        run: crystal run scripts/check_docs.cr -- site/index.json
+      - name: Configure GitHub Pages
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v5
+      - name: Upload GitHub Pages artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    name: Deploy GitHub Pages
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy documentation
+        id: deployment
+        uses: actions/deploy-pages@v4

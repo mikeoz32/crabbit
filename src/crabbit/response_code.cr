@@ -1,4 +1,8 @@
 module Crabbit
+  # RabbitMQ Stream protocol response status.
+  #
+  # `Ok` is the sole success value. Other values can be inspected on
+  # `BrokerError#code` or converted to an exception with `#raise_unless_ok!`.
   enum ResponseCode : UInt16
     Ok                            = 0x01_u16
     StreamDoesNotExist            = 0x02_u16
@@ -22,10 +26,14 @@ module Crabbit
     SaslCannotChangeMechanism     = 0x14_u16
     SaslCannotChangeUsername      = 0x15_u16
 
+    # Returns whether this code represents success.
     def ok? : Bool
       self == Ok
     end
 
+    # Raises `BrokerError` unless this code is `Ok`.
+    #
+    # Optional *context* is prepended to the generated error message.
     def raise_unless_ok!(context : String? = nil) : Nil
       return if ok?
 

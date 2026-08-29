@@ -1,11 +1,20 @@
 module Crabbit
+  # RabbitMQ-compatible seeded MurmurHash3 x86 32-bit implementation.
+  #
+  # `SuperStreamProducer` uses this hash for
+  # `SuperStreamRouting::Hash`. It is exposed so custom routing code can remain
+  # byte-compatible with the official RabbitMQ clients.
   module Murmur3
     extend self
 
-    DEFAULT_SEED =    104_729_u32
-    C1           = 0xcc9e2d51_u32
-    C2           = 0x1b873593_u32
+    # Seed used by RabbitMQ Stream client hash routing.
+    DEFAULT_SEED = 104_729_u32
+    # :nodoc:
+    C1 = 0xcc9e2d51_u32
+    # :nodoc:
+    C2 = 0x1b873593_u32
 
+    # Returns the 32-bit Murmur3 hash of the UTF-8 bytes in *value*.
     def hash32(value : String, seed : UInt32 = DEFAULT_SEED) : UInt32
       data = value.to_slice
       hash = seed
@@ -57,12 +66,20 @@ module Crabbit
     end
   end
 
+  # Aggregate confirmation handle for a super-stream publish.
+  #
+  # Most routing strategies select one partition, but a custom strategy can
+  # publish to several. This handle exposes one `PublishHandle` per selected
+  # partition.
   class SuperStreamPublishHandle
+    # Returns the partition publish handles.
     getter handles : Array(PublishHandle)
 
+    # :nodoc:
     def initialize(@handles : Array(PublishHandle))
     end
 
+    # Waits for every partition confirmation within one shared *timeout*.
     def await(timeout : Time::Span = 30.seconds) : Array(Confirmation)
       deadline = Time.instant + timeout
       handles.map do |handle|
@@ -72,18 +89,27 @@ module Crabbit
       end
     end
 
+    # Registers *callback* on every partition publish and returns `self`.
     def on_confirm(&callback : Confirmation ->) : self
       handles.each { |handle| handle.on_confirm { |confirmation| callback.call(confirmation) } }
       self
     end
 
+    # Returns whether every partition publish has completed.
     def completed? : Bool
       handles.all?(&.completed?)
     end
   end
 
+  # Routes publishes across the current partitions of a RabbitMQ super stream.
+  #
+  # Partition producers are created lazily and share
+  # `SuperStreamProducerOptions#producer`. Topology is refreshed on schedule and
+  # after routing failures.
   class SuperStreamProducer
+    # Returns the logical super-stream name.
     getter super_stream : String
+    # Returns routing and partition-producer options.
     getter options : SuperStreamProducerOptions
 
     @mutex = Mutex.new
@@ -94,6 +120,9 @@ module Crabbit
     @closed = false
     @entity_id = 0_u64
 
+    # Creates a super-stream producer and resolves its initial topology.
+    #
+    # Applications normally call `Environment#super_stream_producer`.
     def initialize(
       @environment : Environment,
       @super_stream : String,
@@ -104,6 +133,10 @@ module Crabbit
       @entity_id = environment.register_entity { close }
     end
 
+    # Routes and publishes an AMQP message.
+    #
+    # *routing_key* overrides `SuperStreamProducerOptions#routing_key_extractor`.
+    # A custom routing strategy ignores both values.
     def publish(message : Message, routing_key : String? = nil) : SuperStreamPublishHandle
       streams = if strategy = options.routing_strategy
                   partitions = current_partitions
@@ -126,6 +159,8 @@ module Crabbit
       raise ex
     end
 
+    # Routes and publishes an AMQP message, invoking the block for each selected
+    # partition's confirmation.
     def publish(
       message : Message,
       routing_key : String? = nil,
@@ -134,12 +169,17 @@ module Crabbit
       publish(message, routing_key).on_confirm { |confirmation| callback.call(confirmation) }
     end
 
+    # Routes and publishes raw, byte, or string payloads using an explicit key.
+    #
+    # `RawMessage` is passed through; `Bytes` and `String` are wrapped in an AMQP
+    # Data section by the partition producer.
     def publish(message : RawMessage | Bytes | String, routing_key : String) : SuperStreamPublishHandle
       streams = route(routing_key)
       raise BrokerError.new(ResponseCode::StreamNotAvailable, "super stream #{super_stream} has no partitions") if streams.empty?
       SuperStreamPublishHandle.new(streams.map { |stream| producer_for(stream).publish(message) })
     end
 
+    # Idempotently closes all partition producers.
     def close : Nil
       producers = @mutex.synchronize do
         return if @closed
@@ -208,7 +248,13 @@ module Crabbit
     end
   end
 
+  # Maintains callback consumers for every current super-stream partition.
+  #
+  # Partition additions and removals are reconciled every
+  # `ConsumerOptions#topology_refresh`. Delivery order is preserved within each
+  # partition, not globally across the super stream.
   class SuperStreamConsumer
+    # Returns the logical super-stream name.
     getter super_stream : String
 
     @mutex = Mutex.new
@@ -216,6 +262,9 @@ module Crabbit
     @closed = false
     @entity_id = 0_u64
 
+    # Creates partition consumers and starts topology refresh.
+    #
+    # Applications normally call `Environment#super_stream_consumer`.
     def initialize(
       @environment : Environment,
       @super_stream : String,
@@ -228,10 +277,12 @@ module Crabbit
       start_topology_refresh
     end
 
+    # Returns a snapshot of the current partition consumers.
     def consumers : Array(Consumer)
       @mutex.synchronize { @consumers.values.dup }
     end
 
+    # Idempotently stops topology refresh and closes all partition consumers.
     def close : Nil
       values = @mutex.synchronize do
         return if @closed

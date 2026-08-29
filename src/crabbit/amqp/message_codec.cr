@@ -1,4 +1,5 @@
 module Crabbit::AMQP
+  # :nodoc:
   module SectionDescriptor
     Header                = 0x70_u64
     DeliveryAnnotations   = 0x71_u64
@@ -12,6 +13,7 @@ module Crabbit::AMQP
   end
 
   struct Encoder
+    # :nodoc:
     def write_described_header(descriptor : UInt64, header : Crabbit::Header) : self
       count = if header.delivery_count
                 5
@@ -44,6 +46,7 @@ module Crabbit::AMQP
       self
     end
 
+    # :nodoc:
     def write_described_properties(descriptor : UInt64, properties : Crabbit::Properties) : self
       count = if properties.reply_to_group_id
                 13
@@ -216,6 +219,7 @@ module Crabbit::AMQP
   end
 
   struct Decoder
+    # :nodoc:
     def read_header : Crabbit::Header
       count, boundary = read_composite_header
       durable = count >= 1 ? read_optional_boolean_field(0) : nil
@@ -235,6 +239,7 @@ module Crabbit::AMQP
       )
     end
 
+    # :nodoc:
     def read_properties : Crabbit::Properties
       count, boundary = read_composite_header
       message_id = count >= 1 ? read_identifier_field(0) : nil
@@ -270,6 +275,7 @@ module Crabbit::AMQP
       )
     end
 
+    # :nodoc:
     def read_application_properties : Hash(String, Value)
       count, boundary = read_map_header
       result = {} of String => Value
@@ -408,12 +414,16 @@ module Crabbit::AMQP
     end
   end
 
+  # Encoder and decoder for complete AMQP 1.0 messages.
+  #
+  # Applications generally use `Crabbit::Message#to_amqp` and
+  # `Crabbit::Message.from_amqp`, which delegate here.
   module MessageCodec
     extend self
 
-    # Fast path used by Producer#publish(Bytes). A bare byte payload is a
-    # single AMQP data section, so no intermediate Message or body copy is
-    # needed.
+    # Encodes *bytes* as a complete message containing one AMQP Data section.
+    #
+    # This fast path avoids constructing an intermediate `Crabbit::Message`.
     def encode_data(bytes : Bytes) : Bytes
       overhead = bytes.size <= UInt8::MAX ? 5 : 8
       io = IO::Memory.new(bytes.size + overhead)
@@ -421,12 +431,14 @@ module Crabbit::AMQP
       io.to_slice
     end
 
+    # Encodes a complete *message* to a newly allocated byte slice.
     def encode(message : Message) : Bytes
       io = IO::Memory.new
       encode(message, io)
       io.to_slice
     end
 
+    # Encodes a complete *message* directly into *io*.
     def encode(message : Message, io : IO) : Nil
       encoder = Encoder.new(io)
       if header = message.header
@@ -459,6 +471,10 @@ module Crabbit::AMQP
       nil
     end
 
+    # Decodes one complete message from *bytes*.
+    #
+    # Binary values are copied unless *zero_copy* is true. Unknown described
+    # sections are preserved in `Crabbit::Message#extra_sections`.
     def decode(bytes : Bytes, *, zero_copy : Bool = false) : Message
       decoder = Decoder.new(bytes, zero_copy: zero_copy)
       header = nil

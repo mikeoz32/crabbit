@@ -1,18 +1,45 @@
 module Crabbit
+  # OAuth 2 client-credentials and refresh settings.
+  #
+  # The token endpoint must use HTTPS unless *allow_insecure_transport* is
+  # explicitly enabled for isolated development. Stream endpoints must also use
+  # TLS when this configuration is attached to `Configuration`.
   struct OAuth2Config
+    # Returns the parsed token endpoint URI.
     getter token_endpoint : URI
+    # Returns the OAuth 2 client identifier.
     getter client_id : String
+    # Returns the OAuth 2 client secret.
     getter client_secret : String
+    # Returns the requested grant type.
     getter grant_type : String
+    # Returns additional form parameters included in token requests.
     getter parameters : Hash(String, String)
+    # Returns the optional trust/client-certificate context for the token endpoint.
     getter tls_context : OpenSSL::SSL::Context::Client?
+    # Returns the token-endpoint connection timeout.
     getter connection_timeout : Time::Span
+    # Returns the token-endpoint read and write timeout.
     getter request_timeout : Time::Span
+    # Returns the fraction of token lifetime after which proactive refresh starts.
     getter refresh_ratio : Float64
+    # Returns the first retry delay after refresh or re-authentication failure.
     getter refresh_retry_delay : Time::Span
+    # Returns the maximum retry delay.
     getter refresh_retry_max_delay : Time::Span
+    # Returns whether unencrypted token and Stream transports are permitted.
     getter allow_insecure_transport : Bool
 
+    # Creates OAuth 2 settings.
+    #
+    # *parameters* can carry provider-specific fields such as `audience` or
+    # `scope`; Crabbit always adds *grant_type*. The HTTP provider uses Basic
+    # client authentication and requires JSON containing `access_token` and a
+    # positive `expires_in`.
+    #
+    # Token refresh is scheduled after *refresh_ratio* of the advertised
+    # lifetime. Retrieval and live re-authentication failures use exponential
+    # backoff between *refresh_retry_delay* and *refresh_retry_max_delay*.
     def initialize(
       token_endpoint : String | URI,
       @client_id : String,
@@ -64,18 +91,35 @@ module Crabbit
     end
   end
 
+  # Access token returned by an `OAuth2TokenProvider`.
+  #
+  # *expires_at* uses the monotonic `Time::Instant` clock and must be in the
+  # future when installed.
   record OAuth2Token, value : String, expires_at : Time::Instant
 
+  # Provider interface for retrieving OAuth 2 access tokens.
+  #
+  # Implement this type for non-standard grants, external credential agents, or
+  # pre-existing token caches. Implementations may block the calling fiber and
+  # should raise `OAuth2Error` with actionable context on failure.
   abstract class OAuth2TokenProvider
+    # Retrieves a non-expired access token.
     abstract def request : OAuth2Token
   end
 
+  # RFC-style HTTP token provider used by default.
+  #
+  # It sends a form-encoded request with HTTP Basic client authentication and
+  # parses JSON `access_token` and `expires_in` fields.
   class OAuth2HttpTokenProvider < OAuth2TokenProvider
+    # Returns the token request configuration.
     getter config : OAuth2Config
 
+    # Creates an HTTP provider for *config*.
     def initialize(@config : OAuth2Config)
     end
 
+    # Requests and validates a fresh token.
     def request : OAuth2Token
       form = config.parameters.dup
       form["grant_type"] = config.grant_type
@@ -133,7 +177,13 @@ module Crabbit
     end
   end
 
+  # Shared SASL PLAIN authenticator backed by an OAuth 2 token provider.
+  #
+  # `Configuration` creates one instance automatically from `OAuth2Config` and
+  # shares it across every environment connection. Construct it directly when
+  # supplying a custom `OAuth2TokenProvider`.
   class OAuth2SaslAuthenticator < SaslAuthenticator
+    # :nodoc:
     alias RefreshCallback = Proc(Bytes, Nil)
 
     private enum Maintenance
@@ -141,6 +191,7 @@ module Crabbit
       Reauthenticate
     end
 
+    # :nodoc:
     class Registration
       getter name : String
 
@@ -201,6 +252,7 @@ module Crabbit
       end
     end
 
+    # Returns the OAuth 2 refresh configuration.
     getter config : OAuth2Config
 
     @mutex = Mutex.new
@@ -216,23 +268,28 @@ module Crabbit
     @worker_running = false
     @signal = Channel(Nil).new(1)
 
+    # Creates an authenticator using *provider* for token retrieval.
     def initialize(
       @config : OAuth2Config,
       @provider : OAuth2TokenProvider = OAuth2HttpTokenProvider.new(config),
     )
     end
 
+    # Returns `"PLAIN"`, the RabbitMQ OAuth 2 SASL transport mechanism.
     def mechanism : String
       "PLAIN"
     end
 
-    # Direct use is supported, but Environment connections use registrations so
-    # that refreshed tokens can be pushed to every open socket.
+    # Returns a PLAIN initial response containing the current bearer token.
+    #
+    # The token is retrieved lazily and refreshed if expired. Environment
+    # connections additionally register for proactive live re-authentication.
     def initial_response : Bytes
       token = current_token
       plain_response(token.value)
     end
 
+    # :nodoc:
     def register(name : String, &callback : Bytes ->) : Registration
       id = @mutex.synchronize do
         @next_registration_id &+= 1_u64
@@ -242,14 +299,17 @@ module Crabbit
       Registration.new(self, id, name)
     end
 
+    # :nodoc:
     def registration_count : Int32
       @mutex.synchronize { @registrations.size }
     end
 
+    # :nodoc:
     def token_generation : UInt64
       @mutex.synchronize { @token_generation }
     end
 
+    # :nodoc:
     def registrations_current? : Bool
       @mutex.synchronize do
         @registrations.values.all? do |registration|

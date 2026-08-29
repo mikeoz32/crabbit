@@ -1,4 +1,9 @@
 module Crabbit
+  # Final outcome of one logical publish.
+  #
+  # `confirmed` is true only for a positive broker confirmation. On failure,
+  # `code` may contain the broker response and `error` contains the associated
+  # exception. A confirmation resolves exactly once.
   record Confirmation,
     publishing_id : UInt64,
     confirmed : Bool,
@@ -166,29 +171,54 @@ module Crabbit
     end
   end
 
+  # Future-like handle for an asynchronous publish confirmation.
+  #
+  # Use `#await` for fiber-blocking code or `#on_confirm` to receive the result
+  # asynchronously. Registering a callback after completion still invokes it.
   class PublishHandle
+    # Returns the publishing ID assigned to the message.
     getter publishing_id : UInt64
 
+    # :nodoc:
     def initialize(@pending : PendingPublish, @default_timeout : Time::Span)
       @publishing_id = pending.publishing_id
     end
 
+    # Waits for and returns the final confirmation.
+    #
+    # Raises `TimeoutError` if the handle has not resolved within *timeout*.
+    # This wait timeout does not cancel the underlying publish.
     def await(timeout : Time::Span = @default_timeout) : Confirmation
       @pending.await(timeout)
     end
 
+    # Schedules *callback* to run once with the final confirmation.
+    #
+    # Callbacks run outside the connection reader fiber. Returns `self`.
     def on_confirm(&callback : Confirmation ->) : self
       @pending.on_complete { |confirmation| callback.call(confirmation) }
       self
     end
 
+    # Returns whether the publish already has a final outcome.
     def completed? : Bool
       @pending.completed?
     end
   end
 
+  # Asynchronous publisher for one RabbitMQ stream.
+  #
+  # Producers batch queued messages, enforce `ProducerOptions#max_unconfirmed`,
+  # and recover indefinitely until closed. Publishing queues work and returns a
+  # `PublishHandle`; it does not wait for a broker confirmation.
+  #
+  # Named producers resume the broker sequence and support deduplication.
+  # Unnamed producers provide at-least-once recovery and can produce duplicates
+  # when a connection fails with an unknown outcome.
   class Producer
+    # Returns the target stream name.
     getter stream : String
+    # Returns the immutable producer options.
     getter options : ProducerOptions
 
     @state_mutex = Mutex.new
@@ -207,6 +237,10 @@ module Crabbit
     @entity_id = 0_u64
     @callback_dispatcher : ConfirmationCallbackDispatcher
 
+    # Creates and declares a producer.
+    #
+    # Applications normally call `Environment#producer` so the environment can
+    # own and close the resource.
     def initialize(@environment : Environment, @stream : String, @options : ProducerOptions)
       @callback_dispatcher = ConfirmationCallbackDispatcher.new
       raise ConfigurationError.new("stream must not be empty") if stream.empty?
@@ -221,22 +255,29 @@ module Crabbit
       transition(ResourceState::Open)
     end
 
+    # Returns the current lifecycle state.
     def state : ResourceState
       @state_mutex.synchronize { @state }
     end
 
+    # Returns whether this producer is currently ready to publish.
     def open? : Bool
       state.open?
     end
 
+    # Returns whether this producer was permanently closed.
     def closed? : Bool
       state.closed?
     end
 
+    # Returns the number of logical messages awaiting a final outcome.
     def unconfirmed_count : Int32
       @confirmations.size
     end
 
+    # Queries RabbitMQ for the last publishing ID of this named producer.
+    #
+    # Raises `ConfigurationError` for an unnamed producer.
     def last_publishing_id : UInt64
       name = options.name || raise ConfigurationError.new(
         "querying the last publishing ID requires a named producer",
@@ -244,6 +285,11 @@ module Crabbit
       @environment.query_publisher_sequence(name, stream)
     end
 
+    # Publishes an AMQP *message* and returns immediately with a handle.
+    #
+    # *filter* selects the server-side filter value and takes precedence over
+    # `ProducerOptions#filter_value_extractor`. *publishing_id* overrides the
+    # automatically allocated monotonically increasing ID.
     def publish(
       message : Message,
       filter : String? = nil,
@@ -254,6 +300,9 @@ module Crabbit
       enqueue(message.to_amqp, effective_filter, publishing_id)
     end
 
+    # Publishes an AMQP *message* and invokes the block on completion.
+    #
+    # Returns the same handle that can also be awaited.
     def publish(
       message : Message,
       filter : String? = nil,
@@ -266,6 +315,7 @@ module Crabbit
       end
     end
 
+    # Publishes already encoded AMQP bytes without re-encoding them.
     def publish(
       message : RawMessage,
       filter : String? = nil,
@@ -275,6 +325,7 @@ module Crabbit
       enqueue(message.bytes, filter, publishing_id)
     end
 
+    # Publishes already encoded AMQP bytes and invokes the block on completion.
     def publish(
       message : RawMessage,
       filter : String? = nil,
@@ -287,6 +338,7 @@ module Crabbit
       end
     end
 
+    # Wraps *bytes* in one AMQP Data section and publishes the message.
     def publish(
       bytes : Bytes,
       filter : String? = nil,
@@ -296,6 +348,8 @@ module Crabbit
       enqueue(AMQP::MessageCodec.encode_data(bytes), filter, publishing_id)
     end
 
+    # Wraps *bytes* in one AMQP Data section, publishes it, and invokes the
+    # block on completion.
     def publish(
       bytes : Bytes,
       filter : String? = nil,
@@ -308,6 +362,7 @@ module Crabbit
       end
     end
 
+    # Encodes *value* as one AMQP Data section and publishes it.
     def publish(
       value : String,
       filter : String? = nil,
@@ -317,6 +372,8 @@ module Crabbit
       publish(value.to_slice, filter, publishing_id: publishing_id)
     end
 
+    # Encodes *value* as one AMQP Data section, publishes it, and invokes the
+    # block on completion.
     def publish(
       value : String,
       filter : String? = nil,
@@ -329,6 +386,10 @@ module Crabbit
       end
     end
 
+    # Publishes one message and waits for its final confirmation.
+    #
+    # This convenience method does not raise negative confirmations; inspect
+    # `Confirmation#confirmed` and `Confirmation#error`.
     def publish_confirmed(
       message : Message | RawMessage | Bytes | String,
       timeout : Time::Span = options.confirm_timeout,
@@ -336,6 +397,9 @@ module Crabbit
       publish(message).await(timeout)
     end
 
+    # Waits until every currently tracked publish has resolved.
+    #
+    # Raises `TimeoutError` if unresolved messages remain after *timeout*.
     def wait_for_confirms(timeout : Time::Span = options.confirm_timeout) : Nil
       deadline = Time.instant + timeout
       loop do
@@ -346,6 +410,7 @@ module Crabbit
       end
     end
 
+    # Idempotently deletes the publisher and fails unresolved handles.
     def close : Nil
       return unless mark_closed
       begin

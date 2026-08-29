@@ -1,4 +1,21 @@
 module Crabbit
+  # Owns Stream connections and creates producers, consumers, and management
+  # requests.
+  #
+  # An environment lazily creates and reuses connections according to the
+  # current stream metadata. Closing it also closes all producers, consumers,
+  # super-stream resources, and pooled connections created through it.
+  #
+  # ```
+  # environment = Crabbit::Environment.connect(
+  #   "rabbitmq-stream://guest:guest@localhost:5552/%2f"
+  # )
+  # begin
+  #   environment.create_stream("events") unless environment.stream_exists?("events")
+  # ensure
+  #   environment.close
+  # end
+  # ```
   class Environment
     private enum ConnectionRole
       Locator
@@ -6,7 +23,9 @@ module Crabbit
       Consumer
     end
 
+    # Returns the immutable connection configuration.
     getter configuration : Configuration
+    # Returns the compression-codec registry used by producers and consumers.
     getter compression_codecs : CompressionCodecs
 
     @pool_mutex = Mutex.new
@@ -17,48 +36,73 @@ module Crabbit
     @seed_cursor = 0
     @closed = false
 
+    # Creates an environment without opening a connection.
+    #
+    # Connections are established lazily by management and messaging methods.
+    # Pass a custom registry to replace or extend sub-entry compression codecs.
     def initialize(
       @configuration : Configuration = Configuration.new,
       @compression_codecs : CompressionCodecs = CompressionCodecs.new,
     )
     end
 
+    # Parses *uri* and returns an environment.
+    #
+    # Named *options* are forwarded to `Configuration.parse`.
     def self.connect(uri : String = Configuration::DEFAULT_URI, **options) : self
       new(Configuration.parse(uri, **options))
     end
 
+    # Returns whether this environment was closed.
     def closed? : Bool
       @pool_mutex.synchronize { @closed }
     end
 
+    # Creates *stream* with the supplied retention and placement options.
+    #
+    # Raises `BrokerError` when RabbitMQ rejects the operation, including when
+    # the stream already exists.
     def create_stream(stream : String, options : StreamOptions = StreamOptions.new) : Nil
       locator.create_stream(stream, options)
     end
 
+    # Deletes *stream*.
     def delete_stream(stream : String) : Nil
       locator.delete_stream(stream)
     end
 
+    # Returns broker statistics for *stream*.
     def stream_stats(stream : String) : StreamStats
       locator.stream_stats(stream)
     end
 
+    # Returns the stored consumer offset, or `nil` when none exists.
     def query_offset(reference : String, stream : String) : UInt64?
       producer_client(stream).query_offset(reference, stream)
     end
 
+    # Stores *offset* for the consumer *reference* and *stream*.
     def store_offset(reference : String, stream : String, offset : UInt64) : Nil
       producer_client(stream).store_offset(reference, stream, offset)
     end
 
+    # Returns the last publishing ID recorded for a named publisher.
+    #
+    # RabbitMQ returns zero when no publisher sequence exists.
     def query_publisher_sequence(reference : String, stream : String) : UInt64
       producer_client(stream).query_publisher_sequence(reference, stream)
     end
 
+    # Returns metadata for every requested stream in input order.
+    #
+    # Per-stream failures are represented by `StreamMetadata#response_code`.
     def metadata(streams : Enumerable(String)) : Array(StreamMetadata)
       locator.metadata(streams)
     end
 
+    # Returns whether *stream* currently exists.
+    #
+    # Errors other than `ResponseCode::StreamDoesNotExist` are raised.
     def stream_exists?(stream : String) : Bool
       value = metadata([stream]).first? ||
               raise ProtocolError.new("metadata response omitted stream #{stream}")
@@ -68,6 +112,10 @@ module Crabbit
       false
     end
 
+    # Resolves a relative or timestamp offset to an absolute stream offset.
+    #
+    # *properties* are forwarded to RabbitMQ's Resolve Offset Specification
+    # command and are useful for broker extensions.
     def resolve_offset(
       stream : String,
       offset : OffsetSpecification,
@@ -76,14 +124,20 @@ module Crabbit
       locator.resolve_offset(stream, offset, properties)
     end
 
+    # Returns the ordered partition stream names of *super_stream*.
     def partitions(super_stream : String) : Array(String)
       locator.partitions(super_stream)
     end
 
+    # Returns the partitions selected by *routing_key* and broker bindings.
     def route(routing_key : String, super_stream : String) : Array(String)
       locator.route(routing_key, super_stream)
     end
 
+    # Creates a super stream from matching partition and binding-key lists.
+    #
+    # Each partition must have a corresponding binding key. *arguments* are
+    # passed to RabbitMQ unchanged.
     def create_super_stream(
       name : String,
       partitions : Enumerable(String),
@@ -93,20 +147,30 @@ module Crabbit
       locator.create_super_stream(name, partitions, binding_keys, arguments)
     end
 
+    # Deletes the super stream *name* and its partitions.
     def delete_super_stream(name : String) : Nil
       locator.delete_super_stream(name)
     end
 
+    # Creates a producer for *stream*.
     def producer(stream : String, options : ProducerOptions = ProducerOptions.new) : Producer
       ensure_open!
       Producer.new(self, stream, options)
     end
 
+    # Creates a pull consumer for *stream*.
+    #
+    # Retrieve deliveries with `Consumer#receive`, `Consumer#receive?`, or
+    # `Consumer#each`.
     def consumer(stream : String, options : ConsumerOptions = ConsumerOptions.new) : Consumer
       ensure_open!
       Consumer.new(self, stream, options)
     end
 
+    # Creates a callback consumer for *stream*.
+    #
+    # The block runs on handler fibers and each delivery is marked processed
+    # after the block returns, even when it raises.
     def consumer(
       stream : String,
       options : ConsumerOptions = ConsumerOptions.new,
@@ -116,6 +180,7 @@ module Crabbit
       Consumer.new(self, stream, options, handler)
     end
 
+    # Creates a producer that routes messages across a super stream.
     def super_stream_producer(
       super_stream : String,
       options : SuperStreamProducerOptions,
@@ -124,6 +189,8 @@ module Crabbit
       SuperStreamProducer.new(self, super_stream, options)
     end
 
+    # Creates callback consumers for all current and future partitions of a
+    # super stream.
     def super_stream_consumer(
       super_stream : String,
       options : ConsumerOptions,
@@ -133,6 +200,7 @@ module Crabbit
       SuperStreamConsumer.new(self, super_stream, options, handler)
     end
 
+    # Idempotently closes all resources and network connections.
     def close : Nil
       entity_closers = @entities_mutex.synchronize do
         values = @entities.values
@@ -162,8 +230,7 @@ module Crabbit
       end
     end
 
-    # Internal entity hooks. They remain public only because Crystal has no
-    # package-private visibility; applications should not call them.
+    # :nodoc:
     def register_entity(&closer : ->) : UInt64
       @entities_mutex.synchronize do
         @next_entity_id &+= 1_u64
@@ -172,10 +239,12 @@ module Crabbit
       end
     end
 
+    # :nodoc:
     def unregister_entity(id : UInt64) : Nil
       @entities_mutex.synchronize { @entities.delete(id) }
     end
 
+    # :nodoc:
     def producer_client(stream : String) : Internal::Client
       metadata = metadata_for(stream)
       leader = metadata.leader || raise BrokerError.new(
@@ -185,6 +254,7 @@ module Crabbit
       client_for_broker(leader, ConnectionRole::Producer)
     end
 
+    # :nodoc:
     def consumer_client(stream : String) : Internal::Client
       metadata = metadata_for(stream)
       candidates = metadata.replicas.shuffle

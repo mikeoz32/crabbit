@@ -7,17 +7,31 @@ require "zstd/decompress/context"
 require "./compression/snappy_crc32c_patch"
 
 module Crabbit
+  # RabbitMQ Stream sub-entry compression algorithm.
   enum Compression : UInt8
-    None   = 0_u8
-    Gzip   = 1_u8
+    # No compression; messages may still be packed as sub-entries.
+    None = 0_u8
+    # Gzip compression.
+    Gzip = 1_u8
+    # Snappy framed-stream compression.
     Snappy = 2_u8
-    Lz4    = 3_u8
-    Zstd   = 4_u8
+    # LZ4 frame compression.
+    Lz4 = 3_u8
+    # Zstandard compression.
+    Zstd = 4_u8
   end
 
+  # Interface for a Stream sub-entry compression algorithm.
+  #
+  # Custom implementations can be installed with
+  # `CompressionCodecs#register`. Decompression must return exactly
+  # *expected_size* bytes or raise `CompressionError`.
   abstract class CompressionCodec
+    # Returns the protocol algorithm implemented by this codec.
     abstract def compression : Compression
+    # Compresses *source* and returns a newly owned byte slice.
     abstract def compress(source : Bytes) : Bytes
+    # Decompresses *source* to exactly *expected_size* bytes.
     abstract def decompress(source : Bytes, expected_size : Int32) : Bytes
 
     protected def validate_size!(result : Bytes, expected_size : Int32) : Bytes
@@ -47,6 +61,7 @@ module Crabbit
     end
   end
 
+  # Pass-through codec for `Compression::None` sub-entries.
   class NoCompressionCodec < CompressionCodec
     def compression : Compression
       Compression::None
@@ -61,6 +76,7 @@ module Crabbit
     end
   end
 
+  # Gzip implementation of `CompressionCodec`.
   class GzipCompressionCodec < CompressionCodec
     def compression : Compression
       Compression::Gzip
@@ -84,6 +100,7 @@ module Crabbit
     end
   end
 
+  # Snappy framed-stream implementation of `CompressionCodec`.
   class SnappyCompressionCodec < CompressionCodec
     def compression : Compression
       Compression::Snappy
@@ -107,6 +124,7 @@ module Crabbit
     end
   end
 
+  # LZ4 frame implementation of `CompressionCodec`.
   class Lz4CompressionCodec < CompressionCodec
     def compression : Compression
       Compression::Lz4
@@ -128,7 +146,9 @@ module Crabbit
     end
   end
 
+  # Zstandard implementation of `CompressionCodec`.
   class ZstdCompressionCodec < CompressionCodec
+    # Creates a codec using the requested Zstandard compression *level*.
     def initialize(@level : Int32 = 3)
     end
 
@@ -153,10 +173,12 @@ module Crabbit
     end
   end
 
+  # Thread-safe registry of codecs used for Stream sub-entry batches.
   class CompressionCodecs
     @mutex = Mutex.new
     @codecs : Hash(Compression, CompressionCodec)
 
+    # Creates a registry containing None, Gzip, Snappy, LZ4, and Zstandard.
     def initialize
       @codecs = {} of Compression => CompressionCodec
       register(NoCompressionCodec.new)
@@ -166,21 +188,29 @@ module Crabbit
       register(ZstdCompressionCodec.new)
     end
 
+    # Creates a registry containing only *codecs*.
     def initialize(codecs : Enumerable(CompressionCodec))
       @codecs = {} of Compression => CompressionCodec
       codecs.each { |codec| register(codec) }
     end
 
+    # Registers or replaces the implementation for `codec.compression`.
+    #
+    # Returns `self` for chaining.
     def register(codec : CompressionCodec) : self
       @mutex.synchronize { @codecs[codec.compression] = codec }
       self
     end
 
+    # Returns the codec registered for *compression*.
+    #
+    # Raises `CompressionError` when no implementation is installed.
     def fetch(compression : Compression) : CompressionCodec
       @mutex.synchronize { @codecs[compression]? } ||
         raise CompressionError.new("no codec registered for #{compression}")
     end
 
+    # Returns an independent registry containing the current codec objects.
     def dup : self
       self.class.new(@mutex.synchronize { @codecs.values.dup })
     end

@@ -1,3 +1,4 @@
+# :nodoc:
 module Crabbit::Internal::Wire
   class Writer
     getter io : IO::Memory

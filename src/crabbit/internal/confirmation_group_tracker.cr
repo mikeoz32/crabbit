@@ -1,3 +1,4 @@
+# :nodoc:
 module Crabbit::Internal
   # Maps broker confirmation IDs to all publishes represented by that ID.
   # This is one-to-one for ordinary publishes and one-to-many for sub-entries.

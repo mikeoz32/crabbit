@@ -1,3 +1,4 @@
+# :nodoc:
 module Crabbit::Internal
   record EncodedSubEntry,
     compression : Compression,

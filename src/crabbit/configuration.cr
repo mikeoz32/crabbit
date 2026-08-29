@@ -1,49 +1,80 @@
 module Crabbit
+  # Built-in SASL authentication mechanisms supported during connection setup.
   enum SaslMechanism
+    # Username/password PLAIN authentication.
     Plain
+    # EXTERNAL authentication, typically backed by a TLS client certificate.
     External
 
+    # Returns the uppercase protocol mechanism name.
     def protocol_name : String
       to_s.upcase
     end
   end
 
+  # Extensibility point for SASL authentication.
+  #
+  # Implement `#mechanism` and `#initial_response`; override `#challenge` only
+  # for challenge-response mechanisms. Pass the implementation as
+  # `Configuration#sasl_authenticator`.
   abstract class SaslAuthenticator
+    # Returns the SASL mechanism name sent to RabbitMQ.
     abstract def mechanism : String
+    # Returns the initial opaque SASL response.
     abstract def initial_response : Bytes
 
+    # Handles a server challenge and returns the next opaque response.
+    #
+    # The base implementation raises `AuthenticationError` because PLAIN and
+    # EXTERNAL do not support challenges.
     def challenge(data : Bytes) : Bytes
       raise AuthenticationError.new("#{mechanism} does not support SASL challenges")
     end
   end
 
+  # SASL PLAIN authenticator using a username and password.
   class PlainSaslAuthenticator < SaslAuthenticator
+    # Creates a PLAIN authenticator.
     def initialize(@username : String, @password : String)
     end
 
+    # Returns `"PLAIN"`.
     def mechanism : String
       "PLAIN"
     end
 
+    # Returns the PLAIN initial response containing the configured credentials.
     def initial_response : Bytes
       "\0#{@username}\0#{@password}".to_slice.dup
     end
   end
 
+  # SASL EXTERNAL authenticator with an empty initial response.
   class ExternalSaslAuthenticator < SaslAuthenticator
+    # Returns `"EXTERNAL"`.
     def mechanism : String
       "EXTERNAL"
     end
 
+    # Returns an empty initial response.
     def initial_response : Bytes
       Bytes.empty
     end
   end
 
+  # TLS settings shared by Stream connections.
   struct TLSConfig
+    # Returns the OpenSSL client context used for certificate verification and
+    # optional client certificates.
     getter context : OpenSSL::SSL::Context::Client
+    # Returns whether the advertised endpoint hostname is verified.
     getter verify_hostname : Bool
 
+    # Creates TLS settings.
+    #
+    # Hostname verification should only be disabled in controlled development
+    # environments. Configure custom trust roots and client certificates on
+    # *context* before opening the environment.
     def initialize(
       @context : OpenSSL::SSL::Context::Client = OpenSSL::SSL::Context::Client.new,
       @verify_hostname : Bool = true,
@@ -51,26 +82,56 @@ module Crabbit
     end
   end
 
+  # Immutable connection, authentication, timeout, and protocol configuration.
+  #
+  # `Configuration.parse` is convenient for one URI endpoint. Construct this
+  # type directly to supply multiple entrypoints, custom SASL, or load-balancer
+  # mode.
   struct Configuration
+    # Default local RabbitMQ Stream URI.
     DEFAULT_URI = "rabbitmq-stream://guest:guest@localhost:5552/%2f"
 
+    # Returns seed endpoints used for metadata and load-balanced connections.
     getter endpoints : Array(Endpoint)
+    # Returns the SASL PLAIN username.
     getter username : String
+    # Returns the SASL PLAIN password.
     getter password : String
+    # Returns the RabbitMQ virtual host.
     getter virtual_host : String
+    # Returns the selected built-in SASL mechanism.
     getter sasl : SaslMechanism
+    # Returns the optional custom SASL authenticator.
     getter sasl_authenticator : SaslAuthenticator?
+    # Returns the optional OAuth 2 configuration.
     getter oauth2 : OAuth2Config?
+    # Returns TLS settings, or `nil` for plain Stream connections.
     getter tls : TLSConfig?
+    # Returns the requested heartbeat interval; zero disables heartbeats.
     getter heartbeat : Time::Span
+    # Returns the requested maximum frame size; zero means no local limit.
     getter max_frame_size : UInt32
+    # Returns the TCP/TLS connection timeout.
     getter connection_timeout : Time::Span
+    # Returns the timeout for correlated protocol requests.
     getter request_timeout : Time::Span
+    # Returns client properties sent during Peer Properties negotiation.
     getter client_properties : Hash(String, String)
+    # Returns whether broker connections must be reached through seed endpoints.
     getter load_balancer : Bool
 
     @oauth2_authenticator : OAuth2SaslAuthenticator?
 
+    # Creates a connection configuration.
+    #
+    # Crabbit rotates through *endpoints* for locator connections. With
+    # *load_balancer*, it also opens producer and consumer connections through
+    # those entrypoints until RabbitMQ advertises the metadata-selected node.
+    #
+    # *client_properties* augment the default product, version, platform, and
+    # information fields. Supplying *oauth2* creates a shared
+    # `OAuth2SaslAuthenticator`; *oauth2* and *sasl_authenticator* are mutually
+    # exclusive.
     def initialize(
       @endpoints : Array(Endpoint) = [Endpoint.new("localhost")],
       @username : String = "guest",
@@ -117,6 +178,7 @@ module Crabbit
       @oauth2_authenticator = oauth2.try { |config| OAuth2SaslAuthenticator.new(config) }
     end
 
+    # Returns the effective authenticator for this configuration.
     def authenticator : SaslAuthenticator
       sasl_authenticator || @oauth2_authenticator || case sasl
       when .plain?    then PlainSaslAuthenticator.new(username, password)
@@ -126,6 +188,20 @@ module Crabbit
       end
     end
 
+    # Parses a RabbitMQ Stream URI into a configuration.
+    #
+    # Supported schemes are `rabbitmq-stream` and `rabbitmq-stream+tls`.
+    # Username, password, and virtual host are percent-decoded. Additional
+    # named *options* are forwarded to `.new`.
+    #
+    # ```
+    # tls = Crabbit::TLSConfig.new(custom_context)
+    # config = Crabbit::Configuration.parse(
+    #   "rabbitmq-stream+tls://user:secret@rabbit.example/%2f",
+    #   tls: tls,
+    #   heartbeat: 30.seconds,
+    # )
+    # ```
     def self.parse(uri : String = DEFAULT_URI, tls : TLSConfig? = nil, **options) : self
       parsed = URI.parse(uri)
       scheme = parsed.scheme

@@ -1,3 +1,4 @@
+# :nodoc:
 module Crabbit::Internal
   class Connection
     enum State

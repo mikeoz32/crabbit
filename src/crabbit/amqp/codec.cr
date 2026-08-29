@@ -1,4 +1,5 @@
 module Crabbit::AMQP
+  # :nodoc:
   module TypeCode
     Described  = 0x00_u8
     Null       = 0x40_u8
@@ -42,22 +43,32 @@ module Crabbit::AMQP
     Array32    = 0xf0_u8
   end
 
+  # Streaming encoder for generic AMQP 1.0 values.
+  #
+  # The encoder writes directly to any `IO`. Use `.encode(value)` for a newly
+  # allocated `Bytes` result or `.encode(value, io)` to avoid the intermediate
+  # output allocation.
   struct Encoder
+    # Returns the destination receiving encoded bytes.
     getter io : IO
 
+    # Creates an encoder writing to *io*.
     def initialize(@io : IO = IO::Memory.new)
     end
 
+    # Encodes *value* to a newly allocated byte slice.
     def self.encode(value : Value) : Bytes
       io = IO::Memory.new
       encode(value, io)
       io.to_slice
     end
 
+    # Encodes *value* directly into *io*.
     def self.encode(value : Value, io : IO) : Nil
       new(io).write(value)
     end
 
+    # Writes one complete AMQP *value* and returns `self`.
     def write(value : Value) : self
       case value.kind
       when .null?
@@ -117,36 +128,44 @@ module Crabbit::AMQP
       self
     end
 
+    # Writes a numeric descriptor followed by a generic AMQP value.
     def write_described(descriptor : UInt64, value : Value) : self
       write_descriptor(descriptor)
       write(value)
       self
     end
 
+    # Writes a numeric descriptor followed by AMQP binary data.
     def write_described_binary(descriptor : UInt64, value : Bytes) : self
       write_descriptor(descriptor)
       write_binary(value)
       self
     end
 
+    # Writes a numeric descriptor followed by an AMQP list.
     def write_described_list(descriptor : UInt64, values : Array(Value)) : self
       write_descriptor(descriptor)
       write_list(values)
       self
     end
 
+    # Writes a numeric descriptor followed by an AMQP map.
     def write_described_map(descriptor : UInt64, values : Hash(Value, Value)) : self
       write_descriptor(descriptor)
       write_map(values)
       self
     end
 
+    # Writes a numeric descriptor followed by a map with AMQP string keys.
     def write_described_string_map(descriptor : UInt64, values : Hash(String, Value)) : self
       write_descriptor(descriptor)
       write_string_map(values)
       self
     end
 
+    # Returns a copy of bytes written to an `IO::Memory` destination.
+    #
+    # Raises `CodecError` when the encoder was constructed with another `IO`.
     def to_slice : Bytes
       memory = io.as?(IO::Memory)
       raise CodecError.new("encoder output is not an IO::Memory") unless memory
@@ -576,27 +595,40 @@ module Crabbit::AMQP
     end
   end
 
+  # Bounds-checked decoder for generic AMQP 1.0 values.
+  #
+  # Decoding copies binary values by default. With *zero_copy*, returned binary
+  # slices reference the input buffer; callers must keep it alive and immutable.
   struct Decoder
+    # Maximum number of elements accepted from an AMQP container declaration.
     MAX_CONTAINER_ELEMENTS = 1_000_000
 
+    # Returns the next unread byte position.
     getter position : Int32
+    # Returns the complete input buffer.
     getter bytes : Bytes
 
+    # Creates a decoder at *position* in *bytes*.
     def initialize(@bytes : Bytes, @position : Int32 = 0, *, @zero_copy : Bool = false)
     end
 
+    # Returns whether all input bytes have been consumed.
     def eof? : Bool
       position == bytes.size
     end
 
+    # Returns the number of unread input bytes.
     def remaining : Int32
       bytes.size - position
     end
 
+    # Reads and returns one complete AMQP value.
     def read : Value
       read_with_code(u8)
     end
 
+    # Returns the numeric descriptor of the next described value without
+    # consuming input, or `nil` when it is absent or non-numeric.
     def peek_described_descriptor : UInt64?
       saved_position = position
       return nil unless u8 == TypeCode::Described
@@ -605,6 +637,7 @@ module Crabbit::AMQP
       @position = saved_position.not_nil!
     end
 
+    # Consumes the next numeric descriptor and validates it against *expected*.
     def consume_described_descriptor(expected : UInt64) : Nil
       raise CodecError.new("expected AMQP described section") unless u8 == TypeCode::Described
       actual = numeric_descriptor_with_code(u8)
@@ -614,6 +647,7 @@ module Crabbit::AMQP
       end
     end
 
+    # Reads one AMQP binary value.
     def read_binary : Bytes
       case code = u8
       when TypeCode::Binary8
@@ -627,6 +661,7 @@ module Crabbit::AMQP
       raise CodecError.new("AMQP length exceeds supported memory size: #{ex.message}")
     end
 
+    # Reads one AMQP list and returns its element values.
     def read_list_values : Array(Value)
       case code = u8
       when TypeCode::List0
@@ -642,6 +677,7 @@ module Crabbit::AMQP
       raise CodecError.new("AMQP length exceeds supported memory size: #{ex.message}")
     end
 
+    # Reads one AMQP map and returns its entries.
     def read_map_values : Hash(Value, Value)
       case code = u8
       when TypeCode::Map8

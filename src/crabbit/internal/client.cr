@@ -1,3 +1,4 @@
+# :nodoc:
 module Crabbit::Internal
   class Client
     alias ConfirmHandler = Proc(Array(UInt64), Nil)

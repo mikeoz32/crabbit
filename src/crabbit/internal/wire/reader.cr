@@ -1,3 +1,4 @@
+# :nodoc:
 module Crabbit::Internal::Wire
   class Reader
     MAX_COLLECTION_ENTRIES = 1_000_000
