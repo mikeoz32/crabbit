@@ -67,11 +67,16 @@ if ENV["CRABBIT_INTEGRATION"]? == "1"
         Crabbit::ConsumerOptions.new(offset: Crabbit::OffsetSpecification.first),
       )
       payload = "owned-by-producer".to_slice.dup
+      callbacks = Channel(Int32).new(3)
 
       begin
         handle = producer.publish(payload)
+        handle.on_confirm { callbacks.send(1) }
+        handle.on_confirm { callbacks.send(2) }
         payload.fill(0x78_u8)
         handle.await(20.seconds).confirmed.should be_true
+        handle.on_confirm { callbacks.send(3) }
+        receive_count(callbacks, 3, 20.seconds).should eq [1, 2, 3]
         delivery = consumer.receive
         String.new(delivery.body).should eq "owned-by-producer"
         delivery.processed!

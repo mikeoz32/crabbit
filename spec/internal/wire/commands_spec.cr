@@ -112,6 +112,18 @@ describe Crabbit::Internal::Wire::Commands do
     end
   end
 
+  it "streams publish confirmation IDs without materializing an array" do
+    bytes = Wire::FrameCodec.command(Wire::Command::PublishConfirm) do |writer|
+      writer.write_u8(7_u8).write_i32(3).write_u64(11_u64).write_u64(12_u64).write_u64(13_u64)
+    end
+
+    confirmation = Wire::Commands.decode_publish_confirmation(Wire::FrameCodec.decode(bytes))
+
+    confirmation.publisher_id.should eq 7_u8
+    confirmation.publishing_ids.size.should eq 3
+    confirmation.publishing_ids.to_a.should eq [11_u64, 12_u64, 13_u64]
+  end
+
   it "preserves the full unsigned offset range" do
     offset = Crabbit::OffsetSpecification.offset(UInt64::MAX)
     frame = Wire::FrameCodec.decode(Wire::Commands.resolve_offset(1_u32, "s", offset))

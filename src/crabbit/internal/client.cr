@@ -1,7 +1,7 @@
 # :nodoc:
 module Crabbit::Internal
   class Client
-    alias ConfirmHandler = Proc(Array(UInt64), Nil)
+    alias ConfirmHandler = Proc(Wire::PublishConfirmationIds, Nil)
     alias PublishErrorHandler = Proc(Hash(UInt64, ResponseCode), Nil)
     alias DeliverHandler = Proc(Wire::Frame, Nil)
     alias ConsumerUpdateHandler = Proc(Bool, OffsetSpecification)
@@ -241,7 +241,11 @@ module Crabbit::Internal
       connection.on(Wire::Command::PublishConfirm) do |frame|
         confirmation = Wire::Commands.decode_publish_confirmation(frame)
         handler = @entity_mutex.synchronize { @confirm_handlers[confirmation.publisher_id]? }
-        handler.try(&.call(confirmation.publishing_ids))
+        if handler
+          handler.call(confirmation.publishing_ids)
+        else
+          confirmation.publishing_ids.each { }
+        end
       end
       connection.on(Wire::Command::PublishError) do |frame|
         failure = Wire::Commands.decode_publish_failure(frame)

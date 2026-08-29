@@ -76,10 +76,14 @@ module Crabbit::Internal
     # Reserves all still-pending messages for one wire write. Timeout handling
     # defers terminal completion while an ID is reserved, closing the stale-send
     # race without holding the tracker mutex across socket IO.
-    def with_pending_singles(ids : Enumerable(UInt64), &send : Array(T) -> Nil) : Bool
-      active_ids = [] of UInt64
+    def with_pending_singles(
+      ids : Enumerable(UInt64),
+      capacity : Int32 = 0,
+      &send : Array(T) -> Nil
+    ) : Bool
+      active_ids = Array(UInt64).new(capacity)
       values = @mutex.synchronize do
-        selected = [] of T
+        selected = Array(T).new(capacity)
         ids.each do |id|
           if !@transmitting.includes?(id) && (value = @pending[id]?)
             active_ids << id
@@ -155,10 +159,25 @@ module Crabbit::Internal
       @mutex.synchronize do
         return nil if defer_if_transmitting && @transmitting.includes?(id)
 
-        value = @pending.delete(id)
-        @transmitting.delete(id)
-        @groups.finished(id) { |member_id| @pending.has_key?(member_id) }
-        value
+        finish_locked(id)
+      end
+    end
+
+    # Moves every pending value covered by a broker confirmation batch into
+    # caller-owned scratch storage under one tracker lock.
+    def finish_confirmed(root_ids : Enumerable(UInt64), finished : Array(T)) : Nil
+      @mutex.synchronize do
+        root_ids.each do |root_id|
+          if ids = @groups.take(root_id)
+            ids.each do |id|
+              if value = finish_locked(id)
+                finished << value
+              end
+            end
+          elsif value = finish_locked(root_id)
+            finished << value
+          end
+        end
       end
     end
 
@@ -179,6 +198,13 @@ module Crabbit::Internal
     # Internal diagnostic used by focused invariant tests.
     def group_count : Int32
       @mutex.synchronize { @groups.size }
+    end
+
+    private def finish_locked(id : UInt64) : T?
+      value = @pending.delete(id)
+      @transmitting.delete(id)
+      @groups.finished(id) { |member_id| @pending.has_key?(member_id) }
+      value
     end
   end
 end

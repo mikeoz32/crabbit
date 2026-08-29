@@ -1,7 +1,22 @@
 # :nodoc:
 module Crabbit::Internal::Wire
   record Response, correlation_id : UInt32, code : ResponseCode, reader : Reader
-  record PublishConfirmation, publisher_id : UInt8, publishing_ids : Array(UInt64)
+
+  struct PublishConfirmationIds
+    include Enumerable(UInt64)
+
+    getter size : Int32
+
+    def initialize(@reader : Reader, @size : Int32)
+    end
+
+    def each(& : UInt64 ->) : Nil
+      size.times { yield @reader.read_u64 }
+      @reader.finish!
+    end
+  end
+
+  record PublishConfirmation, publisher_id : UInt8, publishing_ids : PublishConfirmationIds
   record PublishFailure, publisher_id : UInt8, errors : Hash(UInt64, ResponseCode)
   record MetadataUpdate, code : UInt16, stream : String
   record Tune, max_frame_size : UInt32, heartbeat_seconds : UInt32
@@ -327,9 +342,8 @@ module Crabbit::Internal::Wire
     def decode_publish_confirmation(frame : Frame) : PublishConfirmation
       reader = frame.reader
       publisher_id = reader.read_u8
-      ids = Array(UInt64).new(reader.read_count) { reader.read_u64 }
-      reader.finish!
-      PublishConfirmation.new(publisher_id, ids)
+      count = reader.read_count
+      PublishConfirmation.new(publisher_id, PublishConfirmationIds.new(reader, count))
     end
 
     def decode_publish_failure(frame : Frame) : PublishFailure

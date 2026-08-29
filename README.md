@@ -220,7 +220,7 @@ benchmarks/compare.sh
 
 Results are newline-delimited JSON with message/s, MiB/s, elapsed time, latency p50/p95/p99, and Crystal allocation totals. The codec lane reports the allocating `to_amqp : Bytes` API, direct writes to a reused `IO`, safe-copy and zero-copy decoding, and messages containing header, properties, and application-properties sections. `compare.sh` runs a 500,000-message publish-confirm workload against RabbitMQ's Java Stream client 1.9.0 with matching 1 KiB payloads, fixed batches of 100, and 10,000 outstanding confirms. It uses local Maven when available and otherwise runs Maven/JDK 21 through Docker. Benchmarks are informational and intentionally have no pass/fail performance threshold.
 
-Set `CRABBIT_BENCH_VARIANT` to `bytes-callback` (the default), `bytes-throughput`, or `raw-throughput` to isolate callback dispatch, AMQP data-section encoding, and the pre-encoded wire path.
+Set `CRABBIT_BENCH_VARIANT` to `bytes-callback` (the default), `bytes-throughput`, `raw-throughput`, `bytes-callback-counter`, or `bytes-callback-channel`. The last two remove latency recording and distinguish library callback dispatch from per-confirmation channel signaling.
 
 ## License
 

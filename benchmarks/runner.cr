@@ -176,18 +176,39 @@ module CrabbitBenchmark
 
     latencies = case variant
                 when "bytes-callback"
-                  confirmations = Channel(Int64).new(count)
+                  callback_latencies = Channel(Int64).new(count)
                   count.times do
                     message_started = Time.instant
                     producer.publish(payload) do |confirmation|
                       raise confirmation.error.not_nil! unless confirmation.confirmed
-                      confirmations.send((Time.instant - message_started).total_nanoseconds.to_i64)
+                      callback_latencies.send((Time.instant - message_started).total_nanoseconds.to_i64)
                     end
                   end
-                  Array(Int64).new(count) { confirmations.receive }
+                  Array(Int64).new(count) { callback_latencies.receive }
                 when "bytes-throughput"
                   count.times { producer.publish(payload) }
                   producer.wait_for_confirms(60.seconds)
+                  [] of Int64
+                when "bytes-callback-counter"
+                  confirmed = Atomic(Int32).new(0)
+                  done = Channel(Nil).new(1)
+                  callback = ->(confirmation : Crabbit::Confirmation) do
+                    raise confirmation.error.not_nil! unless confirmation.confirmed
+                    done.send(nil) if confirmed.add(1, :relaxed) == count - 1
+                    nil
+                  end
+                  count.times { producer.publish(payload, &callback) }
+                  done.receive
+                  [] of Int64
+                when "bytes-callback-channel"
+                  completion_signals = Channel(Nil).new(count)
+                  count.times do
+                    producer.publish(payload) do |confirmation|
+                      raise confirmation.error.not_nil! unless confirmation.confirmed
+                      completion_signals.send(nil)
+                    end
+                  end
+                  count.times { completion_signals.receive }
                   [] of Int64
                 when "raw-throughput"
                   count.times { producer.publish(raw_message) }
@@ -195,7 +216,8 @@ module CrabbitBenchmark
                   [] of Int64
                 else
                   raise ArgumentError.new(
-                    "unknown CRABBIT_BENCH_VARIANT #{variant.inspect}; expected bytes-callback, bytes-throughput, or raw-throughput"
+                    "unknown CRABBIT_BENCH_VARIANT #{variant.inspect}; expected bytes-callback, " \
+                    "bytes-throughput, bytes-callback-counter, bytes-callback-channel, or raw-throughput"
                   )
                 end
     elapsed = Time.instant - started

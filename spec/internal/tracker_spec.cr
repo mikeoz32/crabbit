@@ -143,4 +143,19 @@ describe Crabbit::Internal::ConfirmationTracker do
     yielded.should eq [2_u64]
     tracker.group_count.should eq 0
   end
+
+  it "moves ordinary and grouped confirmations into reusable scratch storage" do
+    tracker = Crabbit::Internal::ConfirmationTracker(String).new
+    tracker.add(1_u64, "ordinary")
+    tracker.add(2_u64, "group-first")
+    tracker.add(3_u64, "group-root")
+    tracker.with_pending_groups([[2_u64, 3_u64]]) { }.should be_true
+    finished = [] of String
+
+    tracker.finish_confirmed([1_u64, 3_u64], finished)
+
+    finished.should eq ["ordinary", "group-first", "group-root"]
+    tracker.size.should eq 0
+    tracker.group_count.should eq 0
+  end
 end

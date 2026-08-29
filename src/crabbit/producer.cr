@@ -10,8 +10,29 @@ module Crabbit
     code : ResponseCode? = nil,
     error : Exception? = nil
 
+  private alias ConfirmationCallback = Proc(Confirmation, Nil)
+
+  private class ConfirmationCallbackSlot
+    getter callback : ConfirmationCallback
+
+    def initialize(@callback : ConfirmationCallback)
+    end
+
+    def append(callback : ConfirmationCallback) : Nil
+      previous = @callback
+      @callback = ->(confirmation : Confirmation) do
+        begin
+          previous.call(confirmation)
+        rescue ex
+          Log.error(exception: ex) { "publish confirmation callback failed" }
+        end
+        callback.call(confirmation)
+      end
+    end
+  end
+
   private record ConfirmationCallbackJob,
-    callback : Proc(Confirmation, Nil),
+    callback : ConfirmationCallback,
     confirmation : Confirmation
 
   # User callbacks must not run on the connection reader fiber: they can
@@ -36,7 +57,7 @@ module Crabbit
       {% end %}
     end
 
-    def dispatch(callback : Proc(Confirmation, Nil), confirmation : Confirmation) : Nil
+    def dispatch(callback : ConfirmationCallback, confirmation : Confirmation) : Nil
       accepted = @mutex.synchronize do
         if @closed
           false
@@ -83,7 +104,7 @@ module Crabbit
     rescue Channel::ClosedError
     end
 
-    private def invoke(callback : Proc(Confirmation, Nil), confirmation : Confirmation) : Nil
+    private def invoke(callback : ConfirmationCallback, confirmation : Confirmation) : Nil
       callback.call(confirmation)
     rescue ex
       Log.error(exception: ex) { "publish confirmation callback failed" }
@@ -101,7 +122,7 @@ module Crabbit
     @completed = false
     @sent = false
     @confirmation : Confirmation?
-    @callbacks : Array(Proc(Confirmation, Nil))?
+    @callback_slot : ConfirmationCallbackSlot?
     @done : Channel(Nil)?
 
     def initialize(
@@ -138,20 +159,21 @@ module Crabbit
     end
 
     def complete(confirmation : Confirmation) : Bool
-      callbacks = @mutex.synchronize do
+      @mutex.synchronize do
         return false if @completed
         @completed = true
         @confirmation = confirmation
-        values = @callbacks
-        @callbacks = nil
-        values
-      end
-      @done.try(&.close)
-      if callbacks
-        callbacks.each do |callback|
-          @callback_dispatcher.dispatch(callback, confirmation)
+        callback_slot = @callback_slot
+        @callback_slot = nil
+        # Queue callbacks registered before completion while the state lock
+        # still excludes late registrations. The dispatcher never invokes user
+        # code synchronously, so callbacks retain registration order without
+        # running under this mutex or on the connection reader fiber.
+        if callback_slot
+          @callback_dispatcher.dispatch(callback_slot.callback, confirmation)
         end
       end
+      @done.try(&.close)
       true
     end
 
@@ -160,7 +182,11 @@ module Crabbit
         if @completed
           @confirmation
         else
-          (@callbacks ||= Array(Proc(Confirmation, Nil)).new(1)) << callback
+          if callback_slot = @callback_slot
+            callback_slot.append(callback)
+          else
+            @callback_slot = ConfirmationCallbackSlot.new(callback)
+          end
           nil
         end
       end
@@ -180,6 +206,19 @@ module Crabbit
         raise TimeoutError.new(
           "publisher confirmation #{@publishing_id} did not arrive within #{timeout_span}",
         )
+      end
+    end
+  end
+
+  private struct PendingPublishingIds
+    include Enumerable(UInt64)
+
+    def initialize(@messages : Array(PendingPublish), @start : Int32, @count : Int32)
+    end
+
+    def each(& : UInt64 ->) : Nil
+      @count.times do |offset|
+        yield @messages[@start + offset].publishing_id
       end
     end
   end
@@ -209,7 +248,7 @@ module Crabbit
     #
     # Callbacks run outside the connection reader fiber. Returns `self`.
     def on_confirm(&callback : Confirmation ->) : self
-      @pending.on_complete { |confirmation| callback.call(confirmation) }
+      @pending.on_complete(&callback)
       self
     end
 
@@ -235,12 +274,14 @@ module Crabbit
     getter options : ProducerOptions
 
     @state_mutex = Mutex.new
+    @confirm_mutex = Mutex.new
     @state = ResourceState::Recovering
     @recovering = false
     @send_mutex = Mutex.new
     @sequence_mutex = Mutex.new
     @next_publishing_id = 0_u64
     @confirmations = Internal::ConfirmationTracker(PendingPublish).new
+    @confirmed = [] of PendingPublish
     @queue : Channel(PendingPublish)
     @permits : Channel(Nil)
     @client : Internal::Client? = nil
@@ -323,9 +364,7 @@ module Crabbit
       publishing_id : UInt64? = nil,
       &callback : Confirmation ->
     ) : PublishHandle
-      publish(message, filter, publishing_id: publishing_id).on_confirm do |confirmation|
-        callback.call(confirmation)
-      end
+      publish(message, filter, publishing_id: publishing_id).on_confirm(&callback)
     end
 
     # Publishes already encoded AMQP bytes without re-encoding them.
@@ -346,9 +385,7 @@ module Crabbit
       publishing_id : UInt64? = nil,
       &callback : Confirmation ->
     ) : PublishHandle
-      publish(message, filter, publishing_id: publishing_id).on_confirm do |confirmation|
-        callback.call(confirmation)
-      end
+      publish(message, filter, publishing_id: publishing_id).on_confirm(&callback)
     end
 
     # Copies *bytes*, wraps them in one AMQP Data section, and publishes the message.
@@ -380,9 +417,7 @@ module Crabbit
       publishing_id : UInt64? = nil,
       &callback : Confirmation ->
     ) : PublishHandle
-      publish(bytes, filter, publishing_id: publishing_id).on_confirm do |confirmation|
-        callback.call(confirmation)
-      end
+      publish(bytes, filter, publishing_id: publishing_id).on_confirm(&callback)
     end
 
     # Encodes *value* as one AMQP Data section and publishes it.
@@ -404,9 +439,7 @@ module Crabbit
       publishing_id : UInt64? = nil,
       &callback : Confirmation ->
     ) : PublishHandle
-      publish(value, filter, publishing_id: publishing_id).on_confirm do |confirmation|
-        callback.call(confirmation)
-      end
+      publish(value, filter, publishing_id: publishing_id).on_confirm(&callback)
     end
 
     # Publishes one message and waits for its final confirmation.
@@ -522,7 +555,7 @@ module Crabbit
       publisher_id = client.declare_publisher(
         stream,
         options.name,
-        ->(ids : Array(UInt64)) { confirm(ids) },
+        ->(ids : Internal::Wire::PublishConfirmationIds) { confirm(ids) },
         ->(errors : Hash(UInt64, ResponseCode)) { fail(client, errors) },
       )
       accepted = @state_mutex.synchronize do
@@ -561,7 +594,7 @@ module Crabbit
     private def start_batch_worker : Nil
       spawn(name: "crabbit-producer-#{stream}") do
         while first = @queue.receive?
-          batch = [] of PendingPublish
+          batch = Array(PendingPublish).new(Math.min(options.batch_size, 1_024))
           begin
             batch << first
             deadline = Time.instant + options.batch_delay
@@ -638,9 +671,9 @@ module Crabbit
       publisher_id : UInt8,
       messages : Array(PendingPublish),
     ) : Nil
-      entries = messages.map(&.wire_entry)
-      send_partitioned(entries, client.connection.negotiated_max_frame_size) do |slice|
-        @confirmations.with_pending_singles(slice.each.map(&.publishing_id)) do |pending_messages|
+      each_message_partition(messages, client.connection.negotiated_max_frame_size) do |start, count|
+        ids = PendingPublishingIds.new(messages, start, count)
+        @confirmations.with_pending_singles(ids, count) do |pending_messages|
           active = pending_messages.map do |pending|
             pending.mark_sent
             pending.wire_entry
@@ -650,6 +683,33 @@ module Crabbit
           client.connection.send_publish(publisher_id, active, version)
         end
       end
+    end
+
+    private def each_message_partition(
+      messages : Array(PendingPublish),
+      max_frame_size : UInt32,
+      &send : Int32, Int32 ->
+    ) : Nil
+      start = 0
+      current_size = 13_u64
+      messages.each_with_index do |message, index|
+        entry_size = message.wire_entry.wire_size(2_u16).to_u64
+        candidate_size = current_size + entry_size
+        if max_frame_size > 0 && candidate_size > max_frame_size
+          if index == start
+            raise FrameTooLargeError.new(candidate_size.to_u32!, max_frame_size)
+          end
+          yield start, index - start
+          start = index
+          current_size = 13_u64 + entry_size
+          if max_frame_size > 0 && current_size > max_frame_size
+            raise FrameTooLargeError.new(current_size.to_u32!, max_frame_size)
+          end
+        else
+          current_size = candidate_size
+        end
+      end
+      yield start, messages.size - start if start < messages.size
     end
 
     private def transmit_sub_entries(
@@ -675,7 +735,8 @@ module Crabbit
     end
 
     private def send_partitioned(entries : Array(T), max_frame_size : UInt32, &send_slice : Array(T) ->) : Nil forall T
-      current = [] of T
+      capacity = Math.min(entries.size, 1_024)
+      current = Array(T).new(capacity)
       current_size = 13_u64
       entries.each do |entry|
         entry_size = yield_entry_size(entry)
@@ -685,7 +746,7 @@ module Crabbit
             raise FrameTooLargeError.new(candidate_size.to_u32!, max_frame_size)
           end
           yield current
-          current = [] of T
+          current = Array(T).new(capacity)
           current << entry
           current_size = 13_u64 + entry_size
           single_size = current_size
@@ -714,11 +775,19 @@ module Crabbit
       end
     end
 
-    private def confirm(ids : Array(UInt64)) : Nil
-      ids.each do |root_id|
-        @confirmations.each_group(root_id) do |id|
-          finish(id, Confirmation.new(id, true, ResponseCode::Ok))
+    private def confirm(ids : Internal::Wire::PublishConfirmationIds) : Nil
+      @confirm_mutex.synchronize do
+        @confirmed.clear
+        @confirmations.finish_confirmed(ids, @confirmed)
+        @confirmed.each do |pending|
+          id = pending.publishing_id
+          # Release backpressure before invoking a confirmation callback. A
+          # callback is then free to publish the next message even when the
+          # producer was at max_unconfirmed capacity.
+          @permits.send(nil)
+          pending.complete(Confirmation.new(id, true, ResponseCode::Ok))
         end
+        @confirmed.clear
       end
     end
 
