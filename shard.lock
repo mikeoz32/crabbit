@@ -1,0 +1,14 @@
+version: 2.0
+shards:
+  lz4:
+    git: https://github.com/84codes/lz4.cr.git
+    version: 1.0.0+git.commit.0015e74e0ed0f6bb15de9c25c25034ad4bc7f636
+
+  snappy:
+    git: https://github.com/naqvis/snappy.git
+    version: 0.1.7
+
+  zstd:
+    git: https://github.com/didactic-drunk/zstd.cr.git
+    version: 1.2.0+git.commit.6e63bfcc80fb7ee14019216c1bf5839f09c7120f
+

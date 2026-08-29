@@ -1,0 +1,28 @@
+name: crabbit
+version: 0.1.0
+
+authors:
+  - Crabbit contributors
+
+description: A native RabbitMQ Stream protocol client for Crystal
+
+crystal: ">= 1.20.0"
+
+license: MIT
+
+dependencies:
+  lz4:
+    github: 84codes/lz4.cr
+    commit: 0015e74e0ed0f6bb15de9c25c25034ad4bc7f636
+  snappy:
+    github: naqvis/snappy
+    version: 0.1.7
+  zstd:
+    github: didactic-drunk/zstd.cr
+    commit: 6e63bfcc80fb7ee14019216c1bf5839f09c7120f
+
+targets:
+  crabbit-benchmark:
+    main: benchmarks/runner.cr
+  crabbit-java-reference-sample:
+    main: examples/java_reference/sample_application.cr

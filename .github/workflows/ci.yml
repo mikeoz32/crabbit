@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    name: Crystal ${{ matrix.crystal }}${{ matrix.execution_contexts && ' execution-contexts' || '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crystal: 1.20.3
+            execution_contexts: false
+            flags: ""
+          - crystal: 1.20.3
+            execution_contexts: true
+            flags: -Dpreview_mt -Dexecution_context
+          - crystal: 1.21.0
+            execution_contexts: true
+            flags: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: ${{ matrix.crystal }}
+      - run: sudo apt-get update && sudo apt-get install --yes liblz4-dev
+      - run: shards install
+      - run: crystal tool format --check src spec examples benchmarks/runner.cr
+      - run: crystal spec ${{ matrix.flags }} --error-trace
+      - run: shards build crabbit-benchmark --error-trace
+      - run: crystal build --no-codegen examples/java_reference/sample_application.cr
+      - run: crystal build --no-codegen examples/java_reference/environment_usage.cr
+      - run: crystal build --no-codegen examples/java_reference/producer_usage.cr
+      - run: crystal build --no-codegen examples/java_reference/consumer_usage.cr
+      - run: crystal build --no-codegen examples/java_reference/filtering_usage.cr
+      - run: crystal build --no-codegen examples/java_reference/super_stream_usage.cr
+
+  integration-pinned:
+    name: RabbitMQ 4.3.5 integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+      - run: sudo apt-get update && sudo apt-get install --yes liblz4-dev
+      - run: shards install
+      - run: scripts/integration.sh
+
+  integration-latest:
+    name: RabbitMQ latest compatibility
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      RABBITMQ_IMAGE: rabbitmq:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+      - run: sudo apt-get update && sudo apt-get install --yes liblz4-dev
+      - run: shards install
+      - run: scripts/integration.sh

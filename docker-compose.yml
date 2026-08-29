@@ -1,0 +1,50 @@
+services:
+  rabbitmq:
+    image: ${RABBITMQ_IMAGE:-rabbitmq:4.3.5-management}
+    hostname: rabbitmq
+    command:
+      - bash
+      - -lc
+      - rabbitmq-plugins enable --offline rabbitmq_stream rabbitmq_stream_management && exec rabbitmq-server
+    environment:
+      RABBITMQ_DEFAULT_USER: crabbit
+      RABBITMQ_DEFAULT_PASS: crabbit
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: >-
+        -rabbitmq_stream advertised_host localhost advertised_port 5552
+        -rabbit loopback_users []
+    ports:
+      - "5552:5552"
+      - "15672:15672"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q listeners | grep -q 5552
+      interval: 2s
+      timeout: 5s
+      retries: 45
+      start_period: 10s
+
+  rabbitmq-oauth:
+    image: ${RABBITMQ_IMAGE:-rabbitmq:4.3.5-management}
+    hostname: rabbitmq-oauth
+    command:
+      - bash
+      - -lc
+      - rabbitmq-plugins enable --offline rabbitmq_stream rabbitmq_stream_management rabbitmq_auth_backend_oauth2 && exec rabbitmq-server
+    environment:
+      RABBITMQ_ADVANCED_CONFIG_FILE: /etc/rabbitmq/advanced.config
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: >-
+        -rabbitmq_stream advertised_host localhost advertised_port 5553
+        -rabbit loopback_users []
+    volumes:
+      - ./spec/fixtures/oauth/advanced.config:/etc/rabbitmq/advanced.config:ro
+    ports:
+      - "5553:5552"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q listeners | grep -q 5552
+      interval: 2s
+      timeout: 5s
+      retries: 45
+      start_period: 10s

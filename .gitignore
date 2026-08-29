@@ -1,0 +1,10 @@
+/.crystal/
+/.shards/
+/bin/
+/lib/
+/benchmarks/java/target/
+/docs/
+!/docs/
+!/docs/protocol-support.md
+*.dwarf
+*.out
