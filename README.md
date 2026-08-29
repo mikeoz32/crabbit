@@ -3,6 +3,7 @@
 [![CI](https://github.com/mikeoz32/crabbit/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeoz32/crabbit/actions/workflows/ci.yml)
 [![GitHub release](https://img.shields.io/github/v/release/mikeoz32/crabbit)](https://github.com/mikeoz32/crabbit/releases)
 [![API documentation](https://img.shields.io/badge/docs-API%20reference-blue)](https://mikeoz32.github.io/crabbit/)
+[![shards.info](https://img.shields.io/badge/shards.info-crabbit-blue)](https://shards.info/github/mikeoz32/crabbit/readme)
 
 `crabbit` is a native, asynchronous RabbitMQ Streams client for Crystal. It implements the Stream binary protocol directly, including AMQP 1.0 message encoding, publisher confirms, consumer credit, recovery, filtering, compression, offset tracking, and super streams.
 
