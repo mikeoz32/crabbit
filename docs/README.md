@@ -11,6 +11,7 @@ The [generated API reference](https://mikeoz32.github.io/crabbit/) is the source
 | [Super streams](super-streams.md) | Topology, routing, partition producers and consumers |
 | [OAuth 2](oauth2.md) | Client credentials, custom CAs, refresh, live re-authentication, custom providers |
 | [AMQP codec](amqp-codec.md) | Message sections, values, direct-to-IO encoding, zero-copy decoding |
+| [Benchmarks](benchmarks.md) | Reproduction commands, reference ranges, allocation, and interpretation |
 | [Operations](operations.md) | Recovery, delivery guarantees, error handling, logging, graceful shutdown |
 | [Protocol support](protocol-support.md) | Implemented commands, versions, bounds, and compatibility scope |
 
