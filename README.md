@@ -17,7 +17,7 @@ Add the shard:
 dependencies:
   crabbit:
     github: mikeoz32/crabbit
-    version: ~> 0.1.0
+    version: ~> 0.2.0
 ```
 
 Then run `shards install`. Linux builds need the LZ4 runtime/development library available to the linker (`liblz4-dev` on Debian/Ubuntu). Gzip, Snappy, LZ4, and Zstandard codecs are registered by default; codecs can be replaced through `CompressionCodecs`.

@@ -23,7 +23,7 @@ Add Crabbit to `shard.yml`:
 dependencies:
   crabbit:
     github: mikeoz32/crabbit
-    version: ~> 0.1.0
+    version: ~> 0.2.0
 ```
 
 Then install dependencies:
